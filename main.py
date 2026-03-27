@@ -21,8 +21,7 @@ from pydantic import BaseModel
 
 import time
 from datetime import datetime
-
-# ... (previous imports)
+import traceback
 
 # ---------------------------------------------------------------------------
 # Config
@@ -126,7 +125,9 @@ def gemini_generate(prompt: str, model_id: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Endpoints
-# ---------------------------------------------------------------------------class TranscribeChunkResponse(BaseModel):
+# ---------------------------------------------------------------------------
+
+class TranscribeChunkResponse(BaseModel):
     transcript: str
     session_id: str
 
@@ -140,25 +141,35 @@ async def transcribe_chunk(
     """
     Transcribe a single audio chunk and append it to the session's transcript file.
     """
-    if not session_id:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    audio_bytes = await audio.read()
-    if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Empty audio file received.")
-
     try:
+        print(f"DEBUG: Starting transcribe-chunk {chunk_index} for session {session_id}")
+        if not session_id or session_id == "null":
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            print(f"DEBUG: Generated new session_id: {session_id}")
+
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            print("DEBUG: Empty audio file received.")
+            raise HTTPException(status_code=400, detail="Empty audio file received.")
+
+        print(f"DEBUG: Transcribing {len(audio_bytes)} bytes...")
         transcript = await transcribe_audio(audio_bytes, audio.filename or f"chunk_{chunk_index}.webm")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Whisper error: {exc}") from exc
+        print(f"DEBUG: Transcript received: {transcript[:50]}...")
 
-    # Persist the transcript chunk
-    transcript_path = RECORDINGS_DIR / f"{session_id}_transcript.txt"
-    with open(transcript_path, "a", encoding="utf-8") as f:
-        f.write(f"--- Chunk {chunk_index} ({datetime.now().isoformat()}) ---\n")
-        f.write(transcript + "\n\n")
+        # Persist the transcript chunk
+        transcript_path = RECORDINGS_DIR / f"{session_id}_transcript.txt"
+        with open(transcript_path, "a", encoding="utf-8") as f:
+            f.write(f"--- Chunk {chunk_index} ({datetime.now().isoformat()}) ---\n")
+            f.write(transcript + "\n\n")
+        print(f"DEBUG: Appended chunk {chunk_index} to {transcript_path}")
 
-    return TranscribeChunkResponse(transcript=transcript, session_id=session_id)
+        return TranscribeChunkResponse(transcript=transcript, session_id=session_id)
+    except Exception as e:
+        print("DEBUG: ERROR in transcribe-chunk:")
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class SummariseRequest(BaseModel):
