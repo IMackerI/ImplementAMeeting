@@ -44,12 +44,14 @@ CHAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "chat_prompt.md"
 SUMMARY_PROMPT = SUMMARY_PROMPT_PATH.read_text(encoding="utf-8")
 CHAT_PROMPT = CHAT_PROMPT_PATH.read_text(encoding="utf-8")
 
-# Dynamically fetch available Flash models
+# Dynamically fetch available models (Flash and Pro)
 def fetch_available_models():
     try:
         models = []
         for m in gemini_client.models.list():
-            if 'generateContent' in m.supported_actions and 'flash' in m.name.lower():
+            is_gemini = 'gemini' in m.name.lower()
+            is_flash_pro = 'flash' in m.name.lower() or 'pro' in m.name.lower()
+            if 'generateContent' in m.supported_actions and is_gemini and is_flash_pro:
                 models.append(m.name)
         # Sort so newest/pro might be first, or just alphabetical
         models.sort(reverse=True)
@@ -59,7 +61,8 @@ def fetch_available_models():
         return ["models/gemini-2.0-flash", "models/gemini-1.5-flash"]
 
 AVAILABLE_MODELS = fetch_available_models()
-DEFAULT_MODEL = AVAILABLE_MODELS[0]
+# Prioritize Flash for default as it's faster/cost-effective
+DEFAULT_MODEL = next((m for m in AVAILABLE_MODELS if 'flash' in m.lower()), AVAILABLE_MODELS[0])
 
 RECORDINGS_DIR = Path(__file__).parent.resolve() / "recordings"
 if not RECORDINGS_DIR.exists():
