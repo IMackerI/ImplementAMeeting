@@ -9,7 +9,8 @@ import io
 import os
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +32,7 @@ if not OPENAI_API_KEY:
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is not set in .env")
 
-genai.configure(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Load system prompt once at startup
@@ -89,14 +90,16 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return str(response).strip()
 
 
-async def gemini_generate(prompt: str, model_id: str) -> str:
+def gemini_generate(prompt: str, model_id: str) -> str:
     """Generate text via Gemini. Returns the text response."""
-    model = genai.GenerativeModel(
-        model_name=model_id,
-        system_instruction=SYSTEM_PROMPT,
+    response = gemini_client.models.generate_content(
+        model=model_id,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+        ),
     )
-    result = model.generate_content(prompt)
-    return result.text.strip()
+    return response.text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +109,6 @@ async def gemini_generate(prompt: str, model_id: str) -> str:
 class TranscribeChunkResponse(BaseModel):
     transcript: str
 
-
-class ProcessAudioRequest(BaseModel):
-    """Used by /process-audio (multipart)."""
-    pass
 
 
 @app.post("/transcribe-chunk")
@@ -161,7 +160,7 @@ async def summarise(req: SummariseRequest) -> SummariseResponse:
     )
 
     try:
-        summary = await gemini_generate(prompt, model_id)
+        summary = gemini_generate(prompt, model_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
@@ -199,7 +198,7 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
     )
 
     try:
-        new_summary = await gemini_generate(prompt, model_id)
+        new_summary = gemini_generate(prompt, model_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
