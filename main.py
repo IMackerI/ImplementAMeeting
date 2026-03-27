@@ -116,14 +116,23 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return str(response).strip()
 
 
-def gemini_generate(prompt: str, model_id: str, system_instruction: str = SUMMARY_PROMPT) -> str:
+def gemini_generate(prompt: str, model_id: str, system_instruction: str = SUMMARY_PROMPT, enable_search: bool = False) -> str:
     """Generate text via Gemini. Returns the text response."""
+    config_params = {"system_instruction": system_instruction}
+    
+    if enable_search:
+        # Use the Google Search tool for real-time web information
+        # The new GenAI SDK uses google_search for AI Studio
+        config_params["tools"] = [
+            genai_types.Tool(
+                google_search=genai_types.GoogleSearch()
+            )
+        ]
+
     response = gemini_client.models.generate_content(
         model=model_id,
         contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=system_instruction,
-        ),
+        config=genai_types.GenerateContentConfig(**config_params),
     )
     return response.text.strip()
 
@@ -278,6 +287,7 @@ class ChatRequest(BaseModel):
     session_id: str
     user_prompt: str
     model: str = DEFAULT_MODEL
+    enable_search: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -308,7 +318,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
     try:
-        response_text = gemini_generate(prompt, model_id, system_instruction=CHAT_PROMPT)
+        response_text = gemini_generate(
+            prompt, 
+            model_id, 
+            system_instruction=CHAT_PROMPT,
+            enable_search=req.enable_search
+        )
     except Exception as exc:
         if isinstance(exc, HTTPException):
             raise exc
