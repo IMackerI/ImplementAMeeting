@@ -134,6 +134,9 @@
           <button id="startBtn" class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
             Start Meeting
           </button>
+          <button id="pauseBtn" disabled class="btn bg-slate-700 hover:bg-slate-600 text-white font-semibold text-sm px-6 py-3 rounded-xl border border-white/5 transition-all">
+            Pause
+          </button>
           <button id="stopBtn" disabled class="btn bg-rose-600 hover:bg-rose-500 text-white font-semibold text-sm px-6 py-3 rounded-xl shadow-lg shadow-rose-600/20 transition-all">
             End & Summarize
           </button>
@@ -223,6 +226,7 @@
 
     // --- DOM refs ---
     const startBtn         = document.getElementById('startBtn');
+    const pauseBtn         = document.getElementById('pauseBtn');
     const stopBtn          = document.getElementById('stopBtn');
     const timer            = document.getElementById('timer');
     const chunkStatus      = document.getElementById('chunkStatus');
@@ -284,8 +288,7 @@
     }
 
     function startTimerDisplay() {
-      secondsElapsed = 0;
-      timer.textContent = formatTime(0);
+      timer.textContent = formatTime(secondsElapsed);
       timer.classList.remove('hidden');
       timerInterval = setInterval(() => {
         secondsElapsed++;
@@ -293,16 +296,22 @@
       }, 1000);
     }
 
-    function stopTimerDisplay() {
+    function stopTimerDisplay(hide = true) {
       clearInterval(timerInterval);
-      timer.classList.add('hidden');
+      if (hide) timer.classList.add('hidden');
     }
 
     // --- UI state helpers ---
     function setRecordingUI(active) {
       isRecording = active;
       startBtn.disabled = active;
+      pauseBtn.disabled = !active;
       stopBtn.disabled  = !active;
+      
+      startBtn.textContent = currentSessionId ? 'Resume Meeting' : 'Start Meeting';
+      startBtn.classList.toggle('bg-indigo-600', !active);
+      startBtn.classList.toggle('bg-slate-700', active);
+
       pulseRing1.classList.toggle('hidden', !active);
       pulseRing2.classList.toggle('hidden', !active);
       micIcon.classList.toggle('text-red-500', active);
@@ -320,6 +329,7 @@
       processingStatus.classList.toggle('hidden', !show);
       processingText.textContent = text;
       startBtn.disabled = show || isRecording;
+      pauseBtn.disabled = show || !isRecording;
       stopBtn.disabled  = show;
     }
 
@@ -375,6 +385,7 @@
           }
         }
         chunkStatus.textContent = `✓ Chunk ${idx + 1} finalized`;
+        appendTimelineMarker(secondsElapsed);
       } catch (err) {
         chunkStatus.textContent = `⚠ Chunk ${idx + 1} error`;
         showToast(`Sync Failed: ${idx + 1}`, 'error');
@@ -410,20 +421,34 @@
     }
 
     startBtn.addEventListener('click', () => {
-      allTranscripts = [];
-      chunkIndex = 0;
-      currentSessionId = null; 
-      chatHistory.innerHTML = '';
+      if (!currentSessionId) {
+        allTranscripts = [];
+        chunkIndex = 0;
+        chatHistory.innerHTML = '';
+        secondsElapsed = 0;
+      }
       startRecordingFlow();
     });
 
-    stopBtn.addEventListener('click', async () => {
+    pauseBtn.addEventListener('click', () => {
       if (mediaRecorder?.state !== 'recording') return;
       setRecordingUI(false);
-      stopTimerDisplay();
+      stopTimerDisplay(false); // don't hide, just stop
       if (chunkTimer) clearInterval(chunkTimer);
       mediaRecorder.stop();
       mediaRecorder.stream.getTracks().forEach(t => t.stop());
+      showToast('Meeting Paused', 'info');
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      if (mediaRecorder?.state === 'recording') {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(t => t.stop());
+      }
+      
+      setRecordingUI(false);
+      stopTimerDisplay(true); // hide
+      if (chunkTimer) clearInterval(chunkTimer);
 
       setProcessing(true, 'Analyzing meeting data…');
       await new Promise(r => setTimeout(r, 2000));
@@ -470,6 +495,20 @@
       
       msgDiv.innerHTML = roleLabel + content;
       chatHistory.appendChild(msgDiv);
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    function appendTimelineMarker(seconds) {
+      const marker = document.createElement('div');
+      marker.className = 'flex items-center gap-4 my-4 opacity-40 select-none';
+      marker.innerHTML = `
+        <div class="flex-1 h-px bg-slate-700"></div>
+        <div class="text-[9px] uppercase font-bold tracking-[0.2em] whitespace-nowrap">
+          Received up to ${formatTime(seconds)}
+        </div>
+        <div class="flex-1 h-px bg-slate-700"></div>
+      `;
+      chatHistory.appendChild(marker);
       chatHistory.scrollTop = chatHistory.scrollHeight;
     }
 
