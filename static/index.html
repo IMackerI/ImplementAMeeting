@@ -6,16 +6,37 @@
   <title>Meeting Recorder</title>
   <meta name="description" content="Record meetings, transcribe with Whisper, and summarise with Gemini AI." />
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap');
 
     *, *::before, *::after { box-sizing: border-box; }
+    
+    :root {
+      --primary: #818cf8;
+      --bg-dark: #0b0e14;
+      --card-bg: rgba(23, 28, 41, 0.6);
+      --border: rgba(255, 255, 255, 0.08);
+    }
 
     body {
       font-family: 'Inter', sans-serif;
-      background-color: #0f1117;
-      color: #e2e8f0;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(circle at 10% 10%, rgba(99, 102, 241, 0.1) 0%, transparent 40%),
+        radial-gradient(circle at 90% 90%, rgba(139, 92, 246, 0.08) 0%, transparent 40%);
+      color: #f1f5f9;
       min-height: 100vh;
+      margin: 0;
+    }
+
+    .glass {
+      background: var(--card-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
     }
 
     /* Recording pulse ring */
@@ -23,132 +44,102 @@
       0%   { transform: scale(1);   opacity: 0.6; }
       100% { transform: scale(1.6); opacity: 0; }
     }
-    .pulse-ring {
-      animation: pulse-ring 1.4s ease-out infinite;
-    }
+    .pulse-ring { animation: pulse-ring 1.8s ease-out infinite; }
 
     /* Spinner */
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner {
-      animation: spin 0.9s linear infinite;
-      border: 3px solid #334155;
-      border-top-color: #6366f1;
+      animation: spin 0.8s linear infinite;
+      border: 2px solid rgba(255,255,255,0.1);
+      border-top-color: var(--primary);
       border-radius: 50%;
-      width: 20px;
-      height: 20px;
+      width: 1.25rem;
+      height: 1.25rem;
       display: inline-block;
-      flex-shrink: 0;
     }
 
-    /* Toast */
-    @keyframes slide-in {
-      from { transform: translateY(20px); opacity: 0; }
-      to   { transform: translateY(0);    opacity: 1; }
-    }
-    .toast { animation: slide-in 0.25s ease; }
+    /* Markdown styling */
+    .prose { font-size: 0.875rem; line-height: 1.6; }
+    .prose h1, .prose h2, .prose h3 { color: white; font-weight: 700; margin-top: 1.5rem; margin-bottom: 0.75rem; font-family: 'Outfit', sans-serif; }
+    .prose p { margin-bottom: 0.75rem; color: #cbd5e1; }
+    .prose ul, .prose ol { margin-bottom: 0.75rem; padding-left: 1.25rem; color: #cbd5e1; }
+    .prose li { margin-bottom: 0.25rem; }
+    .prose code { background: rgba(255,255,255,0.1); padding: 0.1rem 0.35rem; border-radius: 0.25rem; font-family: monospace; font-size: 0.8rem; color: #a5b4fc; }
+    .prose pre { background: rgba(0,0,0,0.4); padding: 1.25rem; border-radius: 0.75rem; overflow-x: auto; margin: 1.25rem 0; border: 1px solid var(--border); font-size: 0.75rem; }
 
-    /* Smooth transitions */
-    .fade-in { animation: slide-in 0.3s ease; }
+    .btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); cursor: pointer; }
+    .btn:active { transform: scale(0.96); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    textarea {
-      resize: vertical;
-      scrollbar-width: thin;
-      scrollbar-color: #475569 #1e2533;
-    }
-    textarea:focus { outline: none; box-shadow: 0 0 0 2px #6366f1; }
-
-    details > summary { cursor: pointer; user-select: none; }
-    details > summary:hover { color: #a5b4fc; }
-
-    .btn {
-      transition: background-color 0.15s, transform 0.1s, opacity 0.15s;
-    }
-    .btn:active { transform: scale(0.97); }
-    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 10px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
   </style>
 </head>
-<body class="py-10 px-4">
+<body class="py-12 px-4">
 
   <!-- ======== HEADER ======== -->
-  <header class="max-w-2xl mx-auto mb-8 text-center">
-    <h1 class="text-2xl font-bold tracking-tight text-slate-100">Meeting Recorder</h1>
-    <p class="text-sm text-slate-400 mt-1">Record → Transcribe → Summarise → Edit</p>
+  <header class="max-w-2xl mx-auto mb-10 text-center px-4">
+    <h1 class="text-4xl font-bold tracking-tight text-white mb-3">Meeting Recorder</h1>
+    <p class="text-slate-400 text-sm font-medium tracking-wide uppercase">Capture • Transcribe • Analyze • Search</p>
   </header>
 
-  <main class="max-w-2xl mx-auto space-y-5">
+  <main class="max-w-2xl mx-auto space-y-6">
 
     <!-- ======== SETTINGS ======== -->
-    <section class="bg-[#1a2035] border border-slate-700 rounded-xl p-5">
-      <h2 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Settings</h2>
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
-
+    <section class="glass p-6">
+      <h2 class="text-[10px] font-bold text-slate-500 mb-5 uppercase tracking-[0.2em]">Settings</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-5 items-end">
         <div>
-          <label for="summaryModelSelect" class="block text-xs text-slate-400 mb-1">Summary Model</label>
+          <label for="summaryModelSelect" class="block text-xs text-slate-400 mb-2 font-medium">Summary Model</label>
           <select id="summaryModelSelect"
-            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            class="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all cursor-pointer appearance-none">
             <option value="">Loading…</option>
           </select>
         </div>
 
         <div>
-          <label for="chatModelSelect" class="block text-xs text-slate-400 mb-1">Chat Model</label>
+          <label for="chatModelSelect" class="block text-xs text-slate-400 mb-2 font-medium">Chat Model</label>
           <select id="chatModelSelect"
-            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            class="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all cursor-pointer appearance-none">
             <option value="">Loading…</option>
           </select>
         </div>
 
         <div>
-          <label for="chunkInterval" class="block text-xs text-slate-400 mb-1">Chunk interval (seconds)</label>
+          <label for="chunkInterval" class="block text-xs text-slate-400 mb-2 font-medium">Chunk (sec)</label>
           <input id="chunkInterval" type="number" min="10" max="600" value="30"
-            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+            class="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all" />
         </div>
       </div>
     </section>
 
     <!-- ======== RECORDING CARD ======== -->
-    <section id="recordCard" class="bg-[#1a2035] border border-slate-700 rounded-xl p-6">
-      <div class="flex flex-col items-center gap-5">
-
-        <!-- Mic / Indicator -->
-        <div class="relative flex items-center justify-center w-16 h-16">
-          <!-- Pulse rings (hidden when not recording) -->
-          <span id="pulseRing1"
-            class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/30"></span>
-          <span id="pulseRing2"
-            class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/20"
-            style="animation-delay: 0.5s"></span>
-          <!-- Icon -->
-          <div id="micIcon"
-            class="relative z-10 w-14 h-14 rounded-full bg-[#111827] border border-slate-600 flex items-center justify-center text-slate-400">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none"
-              viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
-              <path stroke-linecap="round" stroke-linejoin="round"
-                d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 016 0v8.25a3 3 0 01-3 3z" />
+    <section id="recordCard" class="glass p-10">
+      <div class="flex flex-col items-center gap-6">
+        <div class="relative flex items-center justify-center w-20 h-20">
+          <span id="pulseRing1" class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/20"></span>
+          <span id="pulseRing2" class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/10" style="animation-delay: 0.6s"></span>
+          <div id="micIcon" class="relative z-10 w-16 h-16 rounded-full bg-slate-900/80 border border-slate-700 flex items-center justify-center text-slate-500 transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 016 0v8.25a3 3 0 01-3 3z" />
             </svg>
           </div>
         </div>
 
-        <!-- Timer -->
-        <div id="timer" class="hidden text-lg font-mono font-medium text-red-400">00:00:00</div>
+        <div id="timer" class="hidden text-2xl font-mono font-bold text-red-500 tracking-tight">00:00:00</div>
+        <div id="chunkStatus" class="hidden text-[10px] text-slate-500 uppercase tracking-widest text-center"></div>
 
-        <!-- Chunk status -->
-        <div id="chunkStatus" class="hidden text-xs text-slate-500 text-center"></div>
-
-        <!-- Buttons -->
-        <div class="flex gap-3">
-          <button id="startBtn"
-            class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-5 py-2.5 rounded-lg">
-            Start Recording
+        <div class="flex gap-4">
+          <button id="startBtn" class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+            Start Meeting
           </button>
-          <button id="stopBtn" disabled
-            class="btn bg-rose-700 hover:bg-rose-600 text-white font-medium text-sm px-5 py-2.5 rounded-lg">
-            Stop &amp; Transcribe
+          <button id="stopBtn" disabled class="btn bg-rose-600 hover:bg-rose-500 text-white font-semibold text-sm px-6 py-3 rounded-xl shadow-lg shadow-rose-600/20 transition-all">
+            End & Summarize
           </button>
         </div>
 
-        <!-- Processing status -->
-        <div id="processingStatus" class="hidden flex items-center gap-3 text-sm text-slate-400">
+        <div id="processingStatus" class="hidden flex items-center gap-3 text-sm text-slate-400 font-medium">
           <span class="spinner"></span>
           <span id="processingText">Processing…</span>
         </div>
@@ -156,65 +147,67 @@
     </section>
 
     <!-- ======== CHAT CARD ======== -->
-    <section id="chatCard" class="hidden bg-[#1a2035] border border-slate-700 rounded-xl p-6 flex flex-col h-[400px]">
-      <h3 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Ask the Meeting AI</h3>
+    <section id="chatCard" class="hidden glass p-6 flex flex-col h-[500px]">
+      <div class="flex items-center justify-between mb-4 px-2">
+        <h3 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Meeting Assistant</h3>
+        <label class="flex items-center gap-2 cursor-pointer group">
+          <span class="text-[10px] uppercase font-bold text-slate-500 group-hover:text-slate-300 transition-colors tracking-tighter">Search Web</span>
+          <div class="relative">
+            <input type="checkbox" id="searchToggle" class="sr-only peer">
+            <div class="w-8 h-4 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600"></div>
+          </div>
+        </label>
+      </div>
       
-      <!-- Chat box -->
-      <div id="chatHistory" class="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-600">
-        <div class="text-xs text-slate-500 italic text-center py-2">Transcript chunks will appear here as they are processed. You can ask questions once the first chunk is ready.</div>
+      <div id="chatHistory" class="flex-1 overflow-y-auto mb-4 space-y-4 pr-2 custom-scrollbar">
+        <div class="text-[10px] text-slate-500 italic text-center py-4 uppercase tracking-widest">Awaiting transcript chunks...</div>
       </div>
 
-      <!-- Chat Input -->
-      <div class="flex gap-2">
+      <div class="flex gap-2 p-2 bg-slate-900/30 rounded-2xl border border-slate-700/50">
         <input id="chatInput" type="text"
-          placeholder="Ask a question about the meeting so far..."
-          class="flex-1 bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          placeholder="Ask a question about the meeting..."
+          class="flex-1 bg-transparent border-none px-4 py-2 text-sm text-slate-200 focus:outline-none" />
         <button id="sendChatBtn"
-          class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-4 py-2 rounded-lg flex items-center gap-2">
-          <span>Send</span>
-          <span id="chatSpinner" class="spinner hidden"></span>
+          class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-5 py-2 rounded-xl transition-all shadow-lg shadow-indigo-600/20">
+          Send
         </button>
       </div>
     </section>
 
     <!-- ======== RESULTS ======== -->
-    <section id="resultsCard" class="hidden bg-[#1a2035] border border-slate-700 rounded-xl p-6 space-y-5 fade-in">
-
-      <!-- Transcript accordion -->
-      <details id="transcriptDetails" class="border border-slate-700 rounded-lg overflow-hidden">
-        <summary class="px-4 py-3 bg-[#111827] text-sm font-medium text-slate-300 flex items-center justify-between">
+    <section id="resultsCard" class="hidden glass p-8 space-y-8 fade-in">
+      <details id="transcriptDetails" class="border border-slate-700/50 rounded-2xl overflow-hidden glass bg-transparent">
+        <summary class="px-5 py-4 text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center justify-between cursor-pointer hover:bg-white/5 transition-colors">
           <span>📝 Full Transcript</span>
           <svg class="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
           </svg>
         </summary>
-        <div class="p-4">
-          <pre id="transcriptDisplay"
-            class="text-xs text-slate-400 whitespace-pre-wrap font-mono max-h-64 overflow-y-auto leading-relaxed"></pre>
+        <div class="p-5 border-t border-slate-700/50 bg-black/20">
+          <pre id="transcriptDisplay" class="text-xs text-slate-400 whitespace-pre-wrap font-mono max-h-64 overflow-y-auto leading-relaxed custom-scrollbar"></pre>
         </div>
       </details>
 
-      <!-- Summary textarea -->
-      <div>
-        <label for="summaryTextarea" class="block text-sm font-medium text-slate-300 mb-2">
-          📋 Summary <span class="text-xs text-slate-500 font-normal">(editable)</span>
-        </label>
-        <textarea id="summaryTextarea" rows="18"
-          class="w-full bg-[#111827] border border-slate-600 rounded-lg px-4 py-3 text-sm text-slate-200 font-mono leading-relaxed"
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+            <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">📋 Summary</label>
+            <button id="toggleEditBtn" class="text-[10px] uppercase font-bold text-indigo-400 hover:text-indigo-300 transition-colors tracking-widest">Preview Markdown</button>
+        </div>
+        <div id="summaryPreview" class="prose max-w-none bg-slate-900/50 border border-slate-700/50 rounded-2xl p-6 min-h-[200px] hidden font-inter"></div>
+        <textarea id="summaryTextarea" rows="20"
+          class="w-full bg-slate-900/50 border border-slate-700/50 rounded-2xl px-5 py-4 text-sm text-slate-200 font-mono leading-relaxed focus:ring-2 focus:ring-indigo-500/50 outline-none transition-all custom-scrollbar"
           placeholder="Summary will appear here…"></textarea>
       </div>
 
-      <!-- AI Edit Panel -->
-      <div class="border-t border-slate-700 pt-4">
-        <p class="text-xs text-slate-500 uppercase tracking-wider mb-3 font-medium">AI Edit</p>
+      <div class="border-t border-slate-700/50 pt-6">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">AI Iteration</p>
         <div class="flex gap-2">
           <input id="editPromptInput" type="text"
-            placeholder='e.g. "Make the timeline shorter" or "Format as bullet points"'
-            class="flex-1 bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+            placeholder='e.g. "Focus more on the budget" or "Summarize into 3 bullets"'
+            class="flex-1 bg-slate-900/50 border border-slate-700/50 rounded-xl px-4 py-3 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all" />
           <button id="updateBtn"
-            class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
-            <span id="updateBtnText">✨ Update</span>
-            <span id="updateSpinner" class="spinner hidden"></span>
+            class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/20 whitespace-nowrap">
+            Update View
           </button>
         </div>
       </div>
@@ -222,10 +215,8 @@
 
   </main>
 
-  <!-- ======== TOAST CONTAINER ======== -->
-  <div id="toastContainer" class="fixed bottom-5 right-5 space-y-2 z-50"></div>
+  <div id="toastContainer" class="fixed bottom-6 right-6 space-y-3 z-50"></div>
 
-  <!-- ======== JS ======== -->
   <script>
   (() => {
     'use strict';
@@ -245,22 +236,22 @@
     const summaryTextarea  = document.getElementById('summaryTextarea');
     const editPromptInput  = document.getElementById('editPromptInput');
     const updateBtn        = document.getElementById('updateBtn');
-    const updateBtnText    = document.getElementById('updateBtnText');
-    const updateSpinner    = document.getElementById('updateSpinner');
     const summaryModelSelect = document.getElementById('summaryModelSelect');
     const chatModelSelect    = document.getElementById('chatModelSelect');
     const chatCard           = document.getElementById('chatCard');
     const chatHistory        = document.getElementById('chatHistory');
     const chatInput          = document.getElementById('chatInput');
     const sendChatBtn        = document.getElementById('sendChatBtn');
-    const chatSpinner        = document.getElementById('chatSpinner');
+    const searchToggle     = document.getElementById('searchToggle');
+    const summaryPreview   = document.getElementById('summaryPreview');
+    const toggleEditBtn    = document.getElementById('toggleEditBtn');
     const chunkIntervalInput = document.getElementById('chunkInterval');
     const toastContainer   = document.getElementById('toastContainer');
 
     // --- State ---
     let mediaRecorder   = null;
     let chunkTimer      = null;
-    let allTranscripts  = [];      // accumulated transcript strings
+    let allTranscripts  = [];
     let chunkIndex      = 0;
     let timerInterval   = null;
     let secondsElapsed  = 0;
@@ -273,12 +264,12 @@
         const res = await fetch('/models');
         const { models, default: def } = await res.json();
         const options = models.map(m =>
-          `<option value="${m}" ${m === def ? 'selected' : ''}>${m}</option>`
+          `<option value="${m}" ${m === def ? 'selected' : ''}>${m.replace('models/', '')}</option>`
         ).join('');
         summaryModelSelect.innerHTML = options;
         chatModelSelect.innerHTML = options;
       } catch {
-        const fallback = '<option value="models/gemini-2.0-flash">models/gemini-2.0-flash</option>';
+        const fallback = '<option value="models/gemini-2.0-flash">gemini-2.0-flash</option>';
         summaryModelSelect.innerHTML = fallback;
         chatModelSelect.innerHTML = fallback;
       }
@@ -314,8 +305,10 @@
       stopBtn.disabled  = !active;
       pulseRing1.classList.toggle('hidden', !active);
       pulseRing2.classList.toggle('hidden', !active);
-      micIcon.classList.toggle('text-red-400', active);
-      micIcon.classList.toggle('text-slate-400', !active);
+      micIcon.classList.toggle('text-red-500', active);
+      micIcon.classList.toggle('border-red-500/50', active);
+      micIcon.classList.toggle('text-slate-500', !active);
+      micIcon.classList.toggle('border-slate-700', !active);
       if (active) {
         chatCard.classList.remove('hidden');
       } else {
@@ -335,17 +328,20 @@
       resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    // --- Toast ---
     function showToast(msg, type = 'error') {
       const el = document.createElement('div');
-      el.className = `toast text-sm px-4 py-3 rounded-lg shadow-lg font-medium max-w-sm ${
-        type === 'error'   ? 'bg-rose-800 text-rose-100' :
-        type === 'success' ? 'bg-emerald-800 text-emerald-100' :
-                             'bg-slate-700 text-slate-200'
-      }`;
+      el.className = `toast text-xs px-5 py-4 rounded-xl shadow-2xl font-bold uppercase tracking-widest ${
+        type === 'error'   ? 'bg-rose-900/90 text-rose-100 border border-rose-500/30' :
+        type === 'success' ? 'bg-emerald-900/90 text-emerald-100 border border-emerald-500/30' :
+                             'bg-slate-800/90 text-slate-200 border border-slate-600/30'
+      } backdrop-blur-xl`;
       el.textContent = msg;
       toastContainer.appendChild(el);
-      setTimeout(() => el.remove(), 4500);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(10px)';
+        setTimeout(() => el.remove(), 300);
+      }, 4000);
     }
 
     // --- Flush a chunk ---
@@ -359,32 +355,29 @@
       form.append('chunk_index', String(idx));
       if (currentSessionId) form.append('session_id', currentSessionId);
 
-      chunkStatus.textContent = `⟳ Transcribing chunk ${idx + 1}…`;
+      chunkStatus.textContent = `• Transcribing chunk ${idx + 1}…`;
       chunkStatus.classList.remove('hidden');
 
       try {
         const res = await fetch('/transcribe-chunk', { method: 'POST', body: form });
-        if (!res.ok) {
-          const content = await res.text();
-          throw new Error(content || res.statusText);
-        }
         const data = await res.json();
         
         if (!currentSessionId && data.session_id) {
           currentSessionId = data.session_id;
-          console.log("Session started:", currentSessionId);
-          showToast(`Session started: ${currentSessionId}`, 'success');
+          showToast('Session Active', 'success');
         }
 
         if (data.transcript) {
           allTranscripts.push(data.transcript);
           transcriptDisplay.textContent = allTranscripts.join('\n\n');
+          if (allTranscripts.length === 1) {
+            appendChatMessage('ai', 'Recording started. I will analyze the meeting context as it arrives. Feel free to ask questions anytime!');
+          }
         }
-        chunkStatus.textContent = `✓ Chunk ${idx + 1} transcribed (${allTranscripts.length} total)`;
+        chunkStatus.textContent = `✓ Chunk ${idx + 1} finalized`;
       } catch (err) {
-        console.error("Transcription error:", err);
-        chunkStatus.textContent = `⚠ Chunk ${idx + 1} failed`;
-        showToast(`Chunk ${idx + 1} failed: ${err.message}`, 'error');
+        chunkStatus.textContent = `⚠ Chunk ${idx + 1} error`;
+        showToast(`Sync Failed: ${idx + 1}`, 'error');
       }
     }
 
@@ -394,101 +387,88 @@
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
-        showToast(`Microphone access denied: ${err.message}`);
+        showToast('Mic Denied', 'error');
         return;
       }
 
-      const mimeType = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', '']
-        .find(m => m === '' || MediaRecorder.isTypeSupported(m));
-
-      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-      
-      let chunkCount = 0;
+      mediaRecorder = new MediaRecorder(stream);
       mediaRecorder.addEventListener('dataavailable', e => {
-        if (e.data && e.data.size > 0) {
-          flushChunk(e.data);
-        }
+        if (e.data && e.data.size > 0) flushChunk(e.data);
       });
 
       mediaRecorder.start();
       setRecordingUI(true);
       startTimerDisplay();
 
-      // Periodic restart to keep chunks independent and valid
       const intervalMs = Math.max(10, Number(chunkIntervalInput.value) || 30) * 1000;
       chunkTimer = setInterval(() => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
+        if (mediaRecorder?.state === 'recording') {
           mediaRecorder.stop(); 
-          mediaRecorder.start(); // Restart immediately
+          mediaRecorder.start();
         }
       }, intervalMs);
     }
 
     startBtn.addEventListener('click', () => {
       allTranscripts = [];
-      chunkIndex     = 0;
+      chunkIndex = 0;
       currentSessionId = null; 
+      chatHistory.innerHTML = '';
       startRecordingFlow();
     });
 
     stopBtn.addEventListener('click', async () => {
-      if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
-
+      if (mediaRecorder?.state !== 'recording') return;
       setRecordingUI(false);
       stopTimerDisplay();
       if (chunkTimer) clearInterval(chunkTimer);
-
       mediaRecorder.stop();
       mediaRecorder.stream.getTracks().forEach(t => t.stop());
 
-      setProcessing(true, 'Finalizing transcription and generating summary…');
-      
-      // Wait a few seconds for final chunk to finish transcribing
-      await new Promise(r => setTimeout(r, 3000));
+      setProcessing(true, 'Analyzing meeting data…');
+      await new Promise(r => setTimeout(r, 2000));
 
       if (allTranscripts.length === 0) {
         setProcessing(false);
-        showToast('No audio transcribed yet. If you just stopped, wait a moment.');
+        showToast('Empty Session', 'error');
         return;
       }
-
-      const fullTranscript = allTranscripts.join('\n\n');
-      transcriptDisplay.textContent = fullTranscript;
 
       try {
         const res = await fetch('/summarise', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            full_transcript: fullTranscript,
+            full_transcript: allTranscripts.join('\n\n'),
             model: summaryModelSelect.value,
             session_id: currentSessionId,
           }),
         });
-        if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || res.statusText);
-        }
         const { summary } = await res.json();
         summaryTextarea.value = summary;
+        renderSummary();
         setProcessing(false);
         showResults();
-        showToast('Meeting processed successfully!', 'success');
+        showToast('Ready', 'success');
       } catch (err) {
         setProcessing(false);
-        showToast(`Summarisation failed: ${err.message}`);
+        showToast('Summary Failed', 'error');
       }
     });
 
     // --- Chat Logic ---
     function appendChatMessage(role, text) {
       const msgDiv = document.createElement('div');
-      msgDiv.className = `p-3 rounded-lg text-sm max-w-[85%] ${
+      msgDiv.className = `p-5 rounded-2xl text-sm max-w-[90%] border ${
         role === 'user' 
-          ? 'bg-indigo-600/20 border border-indigo-500/30 self-end ml-auto text-slate-200' 
-          : 'bg-slate-700/40 border border-slate-600/50 self-start text-slate-300'
+          ? 'bg-indigo-600/10 border-indigo-500/20 self-end ml-auto text-slate-100 shadow-lg' 
+          : 'bg-slate-800/40 border-slate-700/50 self-start text-slate-200'
       }`;
-      msgDiv.innerHTML = `<div class="text-[10px] uppercase font-bold text-slate-500 mb-1">${role}</div><div>${text}</div>`;
+      
+      const roleLabel = `<div class="text-[9px] uppercase font-bold tracking-[0.2em] text-slate-500 mb-3">${role === 'ai' ? 'Assistant' : 'Speaker'}</div>`;
+      const content = `<div class="prose prose-invert">${DOMPurify.sanitize(marked.parse(text))}</div>`;
+      
+      msgDiv.innerHTML = roleLabel + content;
       chatHistory.appendChild(msgDiv);
       chatHistory.scrollTop = chatHistory.scrollHeight;
     }
@@ -496,12 +476,8 @@
     async function handleChat() {
       const question = chatInput.value.trim();
       if (!question) return;
-
       chatInput.value = '';
       appendChatMessage('user', question);
-
-      sendChatBtn.disabled = true;
-      chatSpinner.classList.remove('hidden');
 
       try {
         const res = await fetch('/chat', {
@@ -510,78 +486,69 @@
           body: JSON.stringify({
             session_id: currentSessionId || '',
             user_prompt: question,
-            model: chatModelSelect.value
+            model: chatModelSelect.value,
+            enable_search: searchToggle.checked
           })
         });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.detail || res.statusText);
-        }
-
         const data = await res.json();
         appendChatMessage('ai', data.response);
       } catch (err) {
         console.error("Chat error:", err);
-        showToast(`Chat failed: ${err.message}`);
-        appendChatMessage('ai', `⚠️ Error: ${err.message}`);
-      } finally {
-        sendChatBtn.disabled = false;
-        chatSpinner.classList.add('hidden');
+        showToast(`Chat Error: ${err.message}`, 'error');
+        appendChatMessage('ai', `⚠️ Error: ${err.message}. Please check if the selected model supports the current configuration.`);
       }
     }
 
     sendChatBtn.addEventListener('click', handleChat);
-    chatInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') handleChat();
+    chatInput.addEventListener('keydown', e => { if (e.key === 'Enter') handleChat(); });
+
+    // --- Summary rendering & Toggle ---
+    function renderSummary() {
+      summaryPreview.innerHTML = DOMPurify.sanitize(marked.parse(summaryTextarea.value));
+    }
+
+    toggleEditBtn.addEventListener('click', () => {
+      const isPreview = summaryPreview.classList.contains('hidden');
+      if (isPreview) {
+        renderSummary();
+        summaryPreview.classList.remove('hidden');
+        summaryTextarea.classList.add('hidden');
+        toggleEditBtn.textContent = 'Edit Content';
+      } else {
+        summaryPreview.classList.add('hidden');
+        summaryTextarea.classList.remove('hidden');
+        toggleEditBtn.textContent = 'Preview View';
+      }
     });
 
-    // --- AI Edit ---
     updateBtn.addEventListener('click', async () => {
-      const editPrompt = editPromptInput.value.trim();
-      const currentSummary = summaryTextarea.value.trim();
-
-      if (!editPrompt) { showToast('Please enter an edit prompt.', 'info'); return; }
-      if (!currentSummary) { showToast('Summary is empty.', 'info'); return; }
-
-      updateBtn.disabled = true;
-      updateBtnText.textContent = 'Updating…';
-      updateSpinner.classList.remove('hidden');
-
+      const ep = editPromptInput.value.trim();
+      if (!ep) return;
+      setProcessing(true, 'Updating summary…');
       try {
         const res = await fetch('/edit-summary', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            current_summary: currentSummary,
-            edit_prompt: editPrompt,
+            current_summary: summaryTextarea.value,
+            edit_prompt: ep,
             model: summaryModelSelect.value,
             session_id: currentSessionId,
           }),
         });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.detail || res.statusText);
-        }
         const { summary } = await res.json();
         summaryTextarea.value = summary;
+        if (!summaryPreview.classList.contains('hidden')) renderSummary();
         editPromptInput.value = '';
-        showToast('Summary updated!', 'success');
+        showToast('Updated', 'success');
       } catch (err) {
-        showToast(`Edit failed: ${err.message}`);
+        showToast('Update Failed', 'error');
       } finally {
-        updateBtn.disabled = false;
-        updateBtnText.textContent = '✨ Update';
-        updateSpinner.classList.add('hidden');
+        setProcessing(false);
       }
-    });
-
-    editPromptInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); updateBtn.click(); }
     });
 
   })();
   </script>
-
 </body>
 </html>
