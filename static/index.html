@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Recorder</title>
+  <meta name="description" content="Record meetings, transcribe with Whisper, and summarise with Gemini AI." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    /* Recording pulse ring */
+    @keyframes pulse-ring {
+      0%   { transform: scale(1);   opacity: 0.6; }
+      100% { transform: scale(1.6); opacity: 0; }
+    }
+    .pulse-ring {
+      animation: pulse-ring 1.4s ease-out infinite;
+    }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      animation: spin 0.9s linear infinite;
+      border: 3px solid #334155;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* Toast */
+    @keyframes slide-in {
+      from { transform: translateY(20px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+    .toast { animation: slide-in 0.25s ease; }
+
+    /* Smooth transitions */
+    .fade-in { animation: slide-in 0.3s ease; }
+
+    textarea {
+      resize: vertical;
+      scrollbar-width: thin;
+      scrollbar-color: #475569 #1e2533;
+    }
+    textarea:focus { outline: none; box-shadow: 0 0 0 2px #6366f1; }
+
+    details > summary { cursor: pointer; user-select: none; }
+    details > summary:hover { color: #a5b4fc; }
+
+    .btn {
+      transition: background-color 0.15s, transform 0.1s, opacity 0.15s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  </style>
+</head>
+<body class="py-10 px-4">
+
+  <!-- ======== HEADER ======== -->
+  <header class="max-w-2xl mx-auto mb-8 text-center">
+    <h1 class="text-2xl font-bold tracking-tight text-slate-100">Meeting Recorder</h1>
+    <p class="text-sm text-slate-400 mt-1">Record → Transcribe → Summarise → Edit</p>
+  </header>
+
+  <main class="max-w-2xl mx-auto space-y-5">
+
+    <!-- ======== SETTINGS ======== -->
+    <section class="bg-[#1a2035] border border-slate-700 rounded-xl p-5">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Settings</h2>
+      <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+
+        <div class="flex-1">
+          <label for="modelSelect" class="block text-xs text-slate-400 mb-1">Gemini Model</label>
+          <select id="modelSelect"
+            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+
+        <div class="flex-1">
+          <label for="chunkInterval" class="block text-xs text-slate-400 mb-1">Chunk interval (minutes)</label>
+          <input id="chunkInterval" type="number" min="1" max="30" value="5"
+            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== RECORDING CARD ======== -->
+    <section id="recordCard" class="bg-[#1a2035] border border-slate-700 rounded-xl p-6">
+      <div class="flex flex-col items-center gap-5">
+
+        <!-- Mic / Indicator -->
+        <div class="relative flex items-center justify-center w-16 h-16">
+          <!-- Pulse rings (hidden when not recording) -->
+          <span id="pulseRing1"
+            class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/30"></span>
+          <span id="pulseRing2"
+            class="pulse-ring hidden absolute inset-0 rounded-full bg-red-500/20"
+            style="animation-delay: 0.5s"></span>
+          <!-- Icon -->
+          <div id="micIcon"
+            class="relative z-10 w-14 h-14 rounded-full bg-[#111827] border border-slate-600 flex items-center justify-center text-slate-400">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7" fill="none"
+              viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 016 0v8.25a3 3 0 01-3 3z" />
+            </svg>
+          </div>
+        </div>
+
+        <!-- Timer -->
+        <div id="timer" class="hidden text-lg font-mono font-medium text-red-400">00:00:00</div>
+
+        <!-- Chunk status -->
+        <div id="chunkStatus" class="hidden text-xs text-slate-500 text-center"></div>
+
+        <!-- Buttons -->
+        <div class="flex gap-3">
+          <button id="startBtn"
+            class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-5 py-2.5 rounded-lg">
+            Start Recording
+          </button>
+          <button id="stopBtn" disabled
+            class="btn bg-rose-700 hover:bg-rose-600 text-white font-medium text-sm px-5 py-2.5 rounded-lg">
+            Stop &amp; Transcribe
+          </button>
+        </div>
+
+        <!-- Processing status -->
+        <div id="processingStatus" class="hidden flex items-center gap-3 text-sm text-slate-400">
+          <span class="spinner"></span>
+          <span id="processingText">Processing…</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== RESULTS ======== -->
+    <section id="resultsCard" class="hidden bg-[#1a2035] border border-slate-700 rounded-xl p-6 space-y-5 fade-in">
+
+      <!-- Transcript accordion -->
+      <details id="transcriptDetails" class="border border-slate-700 rounded-lg overflow-hidden">
+        <summary class="px-4 py-3 bg-[#111827] text-sm font-medium text-slate-300 flex items-center justify-between">
+          <span>📝 Full Transcript</span>
+          <svg class="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+          </svg>
+        </summary>
+        <div class="p-4">
+          <pre id="transcriptDisplay"
+            class="text-xs text-slate-400 whitespace-pre-wrap font-mono max-h-64 overflow-y-auto leading-relaxed"></pre>
+        </div>
+      </details>
+
+      <!-- Summary textarea -->
+      <div>
+        <label for="summaryTextarea" class="block text-sm font-medium text-slate-300 mb-2">
+          📋 Summary <span class="text-xs text-slate-500 font-normal">(editable)</span>
+        </label>
+        <textarea id="summaryTextarea" rows="18"
+          class="w-full bg-[#111827] border border-slate-600 rounded-lg px-4 py-3 text-sm text-slate-200 font-mono leading-relaxed"
+          placeholder="Summary will appear here…"></textarea>
+      </div>
+
+      <!-- AI Edit Panel -->
+      <div class="border-t border-slate-700 pt-4">
+        <p class="text-xs text-slate-500 uppercase tracking-wider mb-3 font-medium">AI Edit</p>
+        <div class="flex gap-2">
+          <input id="editPromptInput" type="text"
+            placeholder='e.g. "Make the timeline shorter" or "Format as bullet points"'
+            class="flex-1 bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          <button id="updateBtn"
+            class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
+            <span id="updateBtnText">✨ Update</span>
+            <span id="updateSpinner" class="spinner hidden"></span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ======== TOAST CONTAINER ======== -->
+  <div id="toastContainer" class="fixed bottom-5 right-5 space-y-2 z-50"></div>
+
+  <!-- ======== JS ======== -->
+  <script>
+  (() => {
+    'use strict';
+
+    // --- DOM refs ---
+    const startBtn         = document.getElementById('startBtn');
+    const stopBtn          = document.getElementById('stopBtn');
+    const timer            = document.getElementById('timer');
+    const chunkStatus      = document.getElementById('chunkStatus');
+    const pulseRing1       = document.getElementById('pulseRing1');
+    const pulseRing2       = document.getElementById('pulseRing2');
+    const micIcon          = document.getElementById('micIcon');
+    const processingStatus = document.getElementById('processingStatus');
+    const processingText   = document.getElementById('processingText');
+    const resultsCard      = document.getElementById('resultsCard');
+    const transcriptDisplay= document.getElementById('transcriptDisplay');
+    const summaryTextarea  = document.getElementById('summaryTextarea');
+    const editPromptInput  = document.getElementById('editPromptInput');
+    const updateBtn        = document.getElementById('updateBtn');
+    const updateBtnText    = document.getElementById('updateBtnText');
+    const updateSpinner    = document.getElementById('updateSpinner');
+    const modelSelect      = document.getElementById('modelSelect');
+    const chunkIntervalInput = document.getElementById('chunkInterval');
+    const toastContainer   = document.getElementById('toastContainer');
+
+    // --- State ---
+    let mediaRecorder   = null;
+    let chunkBuffer     = [];      // audio chunks for current interval
+    let allTranscripts  = [];      // accumulated transcript strings
+    let chunkIndex      = 0;
+    let timerInterval   = null;
+    let chunkTimer      = null;
+    let secondsElapsed  = 0;
+    let isRecording     = false;
+
+    // --- Load models ---
+    (async () => {
+      try {
+        const res = await fetch('/models');
+        const { models, default: def } = await res.json();
+        modelSelect.innerHTML = models.map(m =>
+          `<option value="${m}" ${m === def ? 'selected' : ''}>${m}</option>`
+        ).join('');
+      } catch {
+        modelSelect.innerHTML = '<option value="gemini-2.5-flash-preview-04-17">gemini-2.5-flash-preview-04-17</option>';
+      }
+    })();
+
+    // --- Timer helpers ---
+    function formatTime(s) {
+      const h = String(Math.floor(s / 3600)).padStart(2, '0');
+      const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+      const sec = String(s % 60).padStart(2, '0');
+      return `${h}:${m}:${sec}`;
+    }
+
+    function startTimerDisplay() {
+      secondsElapsed = 0;
+      timer.textContent = formatTime(0);
+      timer.classList.remove('hidden');
+      timerInterval = setInterval(() => {
+        secondsElapsed++;
+        timer.textContent = formatTime(secondsElapsed);
+      }, 1000);
+    }
+
+    function stopTimerDisplay() {
+      clearInterval(timerInterval);
+      timer.classList.add('hidden');
+    }
+
+    // --- UI state helpers ---
+    function setRecordingUI(active) {
+      isRecording = active;
+      startBtn.disabled = active;
+      stopBtn.disabled  = !active;
+      pulseRing1.classList.toggle('hidden', !active);
+      pulseRing2.classList.toggle('hidden', !active);
+      micIcon.classList.toggle('text-red-400', active);
+      micIcon.classList.toggle('text-slate-400', !active);
+      if (!active) {
+        chunkStatus.classList.add('hidden');
+      }
+    }
+
+    function setProcessing(show, text = 'Processing…') {
+      processingStatus.classList.toggle('hidden', !show);
+      processingText.textContent = text;
+      startBtn.disabled = show || isRecording;
+      stopBtn.disabled  = show;
+    }
+
+    function showResults() {
+      resultsCard.classList.remove('hidden');
+      resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // --- Toast ---
+    function showToast(msg, type = 'error') {
+      const el = document.createElement('div');
+      el.className = `toast text-sm px-4 py-3 rounded-lg shadow-lg font-medium max-w-sm ${
+        type === 'error'   ? 'bg-rose-800 text-rose-100' :
+        type === 'success' ? 'bg-emerald-800 text-emerald-100' :
+                             'bg-slate-700 text-slate-200'
+      }`;
+      el.textContent = msg;
+      toastContainer.appendChild(el);
+      setTimeout(() => el.remove(), 4500);
+    }
+
+    // --- Flush a chunk: collect current buffer, re-create recorder on same stream ---
+    async function flushChunk(stream) {
+      if (chunkBuffer.length === 0) return;
+
+      const blob = new Blob(chunkBuffer, { type: mediaRecorder.mimeType || 'audio/webm' });
+      chunkBuffer = [];
+
+      const idx = chunkIndex++;
+      const ext  = (mediaRecorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
+      const form = new FormData();
+      form.append('audio', blob, `chunk_${idx}.${ext}`);
+      form.append('chunk_index', String(idx));
+
+      chunkStatus.textContent = `⟳ Transcribing chunk ${idx + 1}…`;
+      chunkStatus.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/transcribe-chunk', { method: 'POST', body: form });
+        if (!res.ok) throw new Error(await res.text());
+        const { transcript } = await res.json();
+        if (transcript) allTranscripts.push(transcript);
+        chunkStatus.textContent = `✓ Chunk ${idx + 1} transcribed (${allTranscripts.length} total)`;
+        // Keep transcript up-to-date as we go
+        transcriptDisplay.textContent = allTranscripts.join('\n\n');
+      } catch (err) {
+        chunkStatus.textContent = `⚠ Chunk ${idx + 1} failed — audio saved locally`;
+        showToast(`Chunk ${idx + 1} transcription failed: ${err.message}`, 'error');
+        // Don't lose the audio — the blob is already gone but we've noted the failure
+      }
+    }
+
+    // --- Schedule periodic chunk flushing ---
+    function startChunkTimer(stream) {
+      const intervalMs = Math.max(1, Number(chunkIntervalInput.value) || 5) * 60 * 1000;
+
+      chunkTimer = setInterval(async () => {
+        if (!isRecording || !mediaRecorder) return;
+
+        // Pause → collect current data → resume
+        mediaRecorder.requestData(); // triggers 'dataavailable' synchronously on some browsers
+        // Give the event loop a tick, then flush
+        setTimeout(() => flushChunk(stream), 100);
+      }, intervalMs);
+    }
+
+    function stopChunkTimer() {
+      clearInterval(chunkTimer);
+      chunkTimer = null;
+    }
+
+    // --- Recording ---
+    startBtn.addEventListener('click', async () => {
+      allTranscripts = [];
+      chunkBuffer    = [];
+      chunkIndex     = 0;
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        showToast(`Microphone access denied: ${err.message}`);
+        return;
+      }
+
+      const mimeType = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', '']
+        .find(m => m === '' || MediaRecorder.isTypeSupported(m));
+
+      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+
+      mediaRecorder.addEventListener('dataavailable', e => {
+        if (e.data && e.data.size > 0) chunkBuffer.push(e.data);
+      });
+
+      // requestData() every 10 s so we always have fresh data in the buffer
+      mediaRecorder.start(10_000);
+
+      setRecordingUI(true);
+      startTimerDisplay();
+      startChunkTimer(stream);
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+
+      setRecordingUI(false);
+      stopTimerDisplay();
+      stopChunkTimer();
+
+      // Collect final data
+      mediaRecorder.requestData();
+      await new Promise(r => setTimeout(r, 150)); // small wait for dataavailable
+
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+
+      setProcessing(true, 'Transcribing final segment…');
+
+      // Flush final chunk
+      if (chunkBuffer.length > 0) {
+        await flushChunk(null);
+      }
+
+      if (allTranscripts.length === 0) {
+        setProcessing(false);
+        showToast('No audio was captured or transcription failed.');
+        return;
+      }
+
+      const fullTranscript = allTranscripts.join('\n\n');
+      transcriptDisplay.textContent = fullTranscript;
+
+      // Summarise
+      setProcessing(true, 'Generating summary…');
+      try {
+        const res = await fetch('/summarise', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            full_transcript: fullTranscript,
+            model: modelSelect.value,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || res.statusText);
+        }
+        const { summary } = await res.json();
+        summaryTextarea.value = summary;
+        setProcessing(false);
+        showResults();
+        showToast('Meeting processed successfully!', 'success');
+      } catch (err) {
+        setProcessing(false);
+        showToast(`Summarisation failed: ${err.message}`);
+      }
+    });
+
+    // --- AI Edit ---
+    updateBtn.addEventListener('click', async () => {
+      const editPrompt = editPromptInput.value.trim();
+      const currentSummary = summaryTextarea.value.trim();
+
+      if (!editPrompt) { showToast('Please enter an edit prompt.', 'info'); return; }
+      if (!currentSummary) { showToast('Summary is empty.', 'info'); return; }
+
+      updateBtn.disabled = true;
+      updateBtnText.textContent = 'Updating…';
+      updateSpinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/edit-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            current_summary: currentSummary,
+            edit_prompt: editPrompt,
+            model: modelSelect.value,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || res.statusText);
+        }
+        const { summary } = await res.json();
+        summaryTextarea.value = summary;
+        editPromptInput.value = '';
+        showToast('Summary updated!', 'success');
+      } catch (err) {
+        showToast(`Edit failed: ${err.message}`);
+      } finally {
+        updateBtn.disabled = false;
+        updateBtnText.textContent = '✨ Update';
+        updateSpinner.classList.add('hidden');
+      }
+    });
+
+    // Allow Enter to submit edit prompt
+    editPromptInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); updateBtn.click(); }
+    });
+
+  })();
+  </script>
+
+</body>
+</html>
