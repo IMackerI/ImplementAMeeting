@@ -37,9 +37,12 @@ if not GEMINI_API_KEY:
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Load system prompt once at startup
-SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
-SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+# Load system prompts at startup
+SUMMARY_PROMPT_PATH = Path(__file__).parent / "prompts" / "summary_prompt.md"
+CHAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "chat_prompt.md"
+
+SUMMARY_PROMPT = SUMMARY_PROMPT_PATH.read_text(encoding="utf-8")
+CHAT_PROMPT = CHAT_PROMPT_PATH.read_text(encoding="utf-8")
 
 # Dynamically fetch available Flash models
 def fetch_available_models():
@@ -113,13 +116,13 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return str(response).strip()
 
 
-def gemini_generate(prompt: str, model_id: str) -> str:
+def gemini_generate(prompt: str, model_id: str, system_instruction: str = SUMMARY_PROMPT) -> str:
     """Generate text via Gemini. Returns the text response."""
     response = gemini_client.models.generate_content(
         model=model_id,
         contents=prompt,
         config=genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_instruction,
         ),
     )
     return response.text.strip()
@@ -256,7 +259,8 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
     try:
         new_summary = gemini_generate(prompt, model_id)
     except Exception as exc:
-        if isinstance(exc, HTTPException): raise exc
+        if isinstance(exc, HTTPException):
+            raise exc
         print(f"ERROR: Gemini edit failed: {exc}")
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
@@ -265,6 +269,50 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
         summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
         summary_path.write_text(new_summary, encoding="utf-8")
     except Exception as exc:
-         print(f"ERROR: Edit persistence failed: {exc}")
+        print(f"ERROR: Edit persistence failed: {exc}")
 
     return EditSummaryResponse(summary=new_summary)
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    user_prompt: str
+    model: str = DEFAULT_MODEL
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """
+    Chat with the AI based on the current transcript context.
+    """
+    sid = sanitize_session_id(req.session_id)
+    transcript_path = RECORDINGS_DIR / f"{sid}_transcript.txt"
+
+    if not transcript_path.exists():
+        # It's possible no chunks have been finalized yet
+        transcript_context = "No transcript available yet."
+    else:
+        transcript_context = transcript_path.read_text(encoding="utf-8")
+
+    model_id = req.model if req.model in AVAILABLE_MODELS else DEFAULT_MODEL
+
+    prompt = (
+        "Below is the transcript of the meeting so far. "
+        "Answer the user's question using this context.\n\n"
+        f"TRANSCRIPT:\n{transcript_context}\n\n"
+        f"USER QUESTION: {req.user_prompt}"
+    )
+
+    try:
+        response_text = gemini_generate(prompt, model_id, system_instruction=CHAT_PROMPT)
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
+        print(f"ERROR: Gemini chat failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
+
+    return ChatResponse(response=response_text)

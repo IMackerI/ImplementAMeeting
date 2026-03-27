@@ -80,19 +80,27 @@
     <!-- ======== SETTINGS ======== -->
     <section class="bg-[#1a2035] border border-slate-700 rounded-xl p-5">
       <h2 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Settings</h2>
-      <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
 
-        <div class="flex-1">
-          <label for="modelSelect" class="block text-xs text-slate-400 mb-1">Gemini Model</label>
-          <select id="modelSelect"
+        <div>
+          <label for="summaryModelSelect" class="block text-xs text-slate-400 mb-1">Summary Model</label>
+          <select id="summaryModelSelect"
             class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
             <option value="">Loading…</option>
           </select>
         </div>
 
-        <div class="flex-1">
-          <label for="chunkInterval" class="block text-xs text-slate-400 mb-1">Chunk interval (minutes)</label>
-          <input id="chunkInterval" type="number" min="1" max="30" value="5"
+        <div>
+          <label for="chatModelSelect" class="block text-xs text-slate-400 mb-1">Chat Model</label>
+          <select id="chatModelSelect"
+            class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="chunkInterval" class="block text-xs text-slate-400 mb-1">Chunk interval (seconds)</label>
+          <input id="chunkInterval" type="number" min="10" max="600" value="30"
             class="w-full bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
         </div>
       </div>
@@ -144,6 +152,28 @@
           <span class="spinner"></span>
           <span id="processingText">Processing…</span>
         </div>
+      </div>
+    </section>
+
+    <!-- ======== CHAT CARD ======== -->
+    <section id="chatCard" class="hidden bg-[#1a2035] border border-slate-700 rounded-xl p-6 flex flex-col h-[400px]">
+      <h3 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider">Ask the Meeting AI</h3>
+      
+      <!-- Chat box -->
+      <div id="chatHistory" class="flex-1 overflow-y-auto mb-4 space-y-3 pr-2 scrollbar-thin scrollbar-thumb-slate-600">
+        <div class="text-xs text-slate-500 italic text-center py-2">Transcript chunks will appear here as they are processed. You can ask questions once the first chunk is ready.</div>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="flex gap-2">
+        <input id="chatInput" type="text"
+          placeholder="Ask a question about the meeting so far..."
+          class="flex-1 bg-[#111827] border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        <button id="sendChatBtn"
+          class="btn bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-4 py-2 rounded-lg flex items-center gap-2">
+          <span>Send</span>
+          <span id="chatSpinner" class="spinner hidden"></span>
+        </button>
       </div>
     </section>
 
@@ -217,12 +247,19 @@
     const updateBtn        = document.getElementById('updateBtn');
     const updateBtnText    = document.getElementById('updateBtnText');
     const updateSpinner    = document.getElementById('updateSpinner');
-    const modelSelect      = document.getElementById('modelSelect');
+    const summaryModelSelect = document.getElementById('summaryModelSelect');
+    const chatModelSelect    = document.getElementById('chatModelSelect');
+    const chatCard           = document.getElementById('chatCard');
+    const chatHistory        = document.getElementById('chatHistory');
+    const chatInput          = document.getElementById('chatInput');
+    const sendChatBtn        = document.getElementById('sendChatBtn');
+    const chatSpinner        = document.getElementById('chatSpinner');
     const chunkIntervalInput = document.getElementById('chunkInterval');
     const toastContainer   = document.getElementById('toastContainer');
 
     // --- State ---
     let mediaRecorder   = null;
+    let chunkTimer      = null;
     let allTranscripts  = [];      // accumulated transcript strings
     let chunkIndex      = 0;
     let timerInterval   = null;
@@ -235,11 +272,15 @@
       try {
         const res = await fetch('/models');
         const { models, default: def } = await res.json();
-        modelSelect.innerHTML = models.map(m =>
+        const options = models.map(m =>
           `<option value="${m}" ${m === def ? 'selected' : ''}>${m}</option>`
         ).join('');
+        summaryModelSelect.innerHTML = options;
+        chatModelSelect.innerHTML = options;
       } catch {
-        modelSelect.innerHTML = '<option value="models/gemini-2.0-flash">models/gemini-2.0-flash</option>';
+        const fallback = '<option value="models/gemini-2.0-flash">models/gemini-2.0-flash</option>';
+        summaryModelSelect.innerHTML = fallback;
+        chatModelSelect.innerHTML = fallback;
       }
     })();
 
@@ -275,7 +316,9 @@
       pulseRing2.classList.toggle('hidden', !active);
       micIcon.classList.toggle('text-red-400', active);
       micIcon.classList.toggle('text-slate-400', !active);
-      if (!active) {
+      if (active) {
+        chatCard.classList.remove('hidden');
+      } else {
         chunkStatus.classList.add('hidden');
       }
     }
@@ -372,7 +415,7 @@
       startTimerDisplay();
 
       // Periodic restart to keep chunks independent and valid
-      const intervalMs = Math.max(1, Number(chunkIntervalInput.value) || 1) * 60 * 1000;
+      const intervalMs = Math.max(10, Number(chunkIntervalInput.value) || 30) * 1000;
       chunkTimer = setInterval(() => {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           mediaRecorder.stop(); 
@@ -418,7 +461,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             full_transcript: fullTranscript,
-            model: modelSelect.value,
+            model: summaryModelSelect.value,
             session_id: currentSessionId,
           }),
         });
@@ -435,6 +478,62 @@
         setProcessing(false);
         showToast(`Summarisation failed: ${err.message}`);
       }
+    });
+
+    // --- Chat Logic ---
+    function appendChatMessage(role, text) {
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `p-3 rounded-lg text-sm max-w-[85%] ${
+        role === 'user' 
+          ? 'bg-indigo-600/20 border border-indigo-500/30 self-end ml-auto text-slate-200' 
+          : 'bg-slate-700/40 border border-slate-600/50 self-start text-slate-300'
+      }`;
+      msgDiv.innerHTML = `<div class="text-[10px] uppercase font-bold text-slate-500 mb-1">${role}</div><div>${text}</div>`;
+      chatHistory.appendChild(msgDiv);
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    async function handleChat() {
+      const question = chatInput.value.trim();
+      if (!question) return;
+
+      chatInput.value = '';
+      appendChatMessage('user', question);
+
+      sendChatBtn.disabled = true;
+      chatSpinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: currentSessionId || '',
+            user_prompt: question,
+            model: chatModelSelect.value
+          })
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || res.statusText);
+        }
+
+        const data = await res.json();
+        appendChatMessage('ai', data.response);
+      } catch (err) {
+        console.error("Chat error:", err);
+        showToast(`Chat failed: ${err.message}`);
+        appendChatMessage('ai', `⚠️ Error: ${err.message}`);
+      } finally {
+        sendChatBtn.disabled = false;
+        chatSpinner.classList.add('hidden');
+      }
+    }
+
+    sendChatBtn.addEventListener('click', handleChat);
+    chatInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') handleChat();
     });
 
     // --- AI Edit ---
@@ -456,7 +555,7 @@
           body: JSON.stringify({
             current_summary: currentSummary,
             edit_prompt: editPrompt,
-            model: modelSelect.value,
+            model: summaryModelSelect.value,
             session_id: currentSessionId,
           }),
         });
