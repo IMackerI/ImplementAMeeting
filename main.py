@@ -19,6 +19,11 @@ from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+import time
+from datetime import datetime
+
+# ... (previous imports)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -39,13 +44,25 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
-# Supported Gemini Flash models (shown in UI dropdown)
-AVAILABLE_MODELS: list[str] = [
-    "gemini-2.5-flash-preview-04-17",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-]
+# Dynamically fetch available Flash models
+def fetch_available_models():
+    try:
+        models = []
+        for m in gemini_client.models.list():
+            if 'generateContent' in m.supported_actions and 'flash' in m.name.lower():
+                models.append(m.name)
+        # Sort so newest/pro might be first, or just alphabetical
+        models.sort(reverse=True)
+        return models if models else ["models/gemini-2.0-flash"]
+    except Exception as e:
+        print(f"Error fetching models: {e}")
+        return ["models/gemini-2.0-flash", "models/gemini-1.5-flash"]
+
+AVAILABLE_MODELS = fetch_available_models()
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
+
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+RECORDINGS_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # App
@@ -65,6 +82,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 async def serve_ui() -> FileResponse:
     return FileResponse("static/index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse("static/favicon.ico")
 
 
 @app.get("/models")
@@ -104,23 +126,23 @@ def gemini_generate(prompt: str, model_id: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Endpoints
-# ---------------------------------------------------------------------------
-
-class TranscribeChunkResponse(BaseModel):
+# ---------------------------------------------------------------------------class TranscribeChunkResponse(BaseModel):
     transcript: str
-
+    session_id: str
 
 
 @app.post("/transcribe-chunk")
 async def transcribe_chunk(
     audio: UploadFile = File(...),
     chunk_index: int = Form(0),
+    session_id: str = Form(None),
 ) -> TranscribeChunkResponse:
     """
-    Transcribe a single audio chunk (called periodically during long recordings).
-    Returns only the transcript — no summarisation yet.
-    This allows the frontend to accumulate text safely throughout a long meeting.
+    Transcribe a single audio chunk and append it to the session's transcript file.
     """
+    if not session_id:
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file received.")
@@ -130,12 +152,19 @@ async def transcribe_chunk(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Whisper error: {exc}") from exc
 
-    return TranscribeChunkResponse(transcript=transcript)
+    # Persist the transcript chunk
+    transcript_path = RECORDINGS_DIR / f"{session_id}_transcript.txt"
+    with open(transcript_path, "a", encoding="utf-8") as f:
+        f.write(f"--- Chunk {chunk_index} ({datetime.now().isoformat()}) ---\n")
+        f.write(transcript + "\n\n")
+
+    return TranscribeChunkResponse(transcript=transcript, session_id=session_id)
 
 
 class SummariseRequest(BaseModel):
     full_transcript: str
     model: str = DEFAULT_MODEL
+    session_id: str = None
 
 
 class SummariseResponse(BaseModel):
@@ -145,13 +174,15 @@ class SummariseResponse(BaseModel):
 @app.post("/summarise", response_model=SummariseResponse)
 async def summarise(req: SummariseRequest) -> SummariseResponse:
     """
-    Create the initial PM summary from the full accumulated transcript.
-    Called once the recording is finished.
+    Create the initial PM summary and save it.
     """
     if not req.full_transcript.strip():
         raise HTTPException(status_code=400, detail="Transcript is empty.")
 
     model_id = req.model if req.model in AVAILABLE_MODELS else DEFAULT_MODEL
+    
+    # Use existing session_id or create new one
+    sid = req.session_id or f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     prompt = (
         "Below is the full transcript of a meeting. "
@@ -164,6 +195,10 @@ async def summarise(req: SummariseRequest) -> SummariseResponse:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
+    # Persist the summary
+    summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
+    summary_path.write_text(summary, encoding="utf-8")
+
     return SummariseResponse(summary=summary)
 
 
@@ -171,6 +206,7 @@ class EditSummaryRequest(BaseModel):
     current_summary: str
     edit_prompt: str
     model: str = DEFAULT_MODEL
+    session_id: str = None
 
 
 class EditSummaryResponse(BaseModel):
@@ -180,7 +216,7 @@ class EditSummaryResponse(BaseModel):
 @app.post("/edit-summary", response_model=EditSummaryResponse)
 async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
     """
-    Iteratively rewrite the current summary based on an AI edit prompt.
+    Iteratively rewrite the current summary and update the saved file.
     """
     if not req.current_summary.strip():
         raise HTTPException(status_code=400, detail="Summary is empty.")
@@ -188,6 +224,7 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
         raise HTTPException(status_code=400, detail="Edit prompt is empty.")
 
     model_id = req.model if req.model in AVAILABLE_MODELS else DEFAULT_MODEL
+    sid = req.session_id # Optional fallback
 
     prompt = (
         "You are given an existing meeting summary and an editing instruction. "
@@ -201,5 +238,10 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
         new_summary = gemini_generate(prompt, model_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
+
+    # Update persistent summary if session_id is available
+    if sid:
+        summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
+        summary_path.write_text(new_summary, encoding="utf-8")
 
     return EditSummaryResponse(summary=new_summary)

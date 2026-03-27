@@ -230,6 +230,7 @@
     let chunkTimer      = null;
     let secondsElapsed  = 0;
     let isRecording     = false;
+    let currentSessionId = null;
 
     // --- Load models ---
     (async () => {
@@ -240,7 +241,7 @@
           `<option value="${m}" ${m === def ? 'selected' : ''}>${m}</option>`
         ).join('');
       } catch {
-        modelSelect.innerHTML = '<option value="gemini-2.5-flash-preview-04-17">gemini-2.5-flash-preview-04-17</option>';
+        modelSelect.innerHTML = '<option value="models/gemini-2.0-flash">models/gemini-2.0-flash</option>';
       }
     })();
 
@@ -306,7 +307,7 @@
       setTimeout(() => el.remove(), 4500);
     }
 
-    // --- Flush a chunk: collect current buffer, re-create recorder on same stream ---
+    // --- Flush a chunk ---
     async function flushChunk(stream) {
       if (chunkBuffer.length === 0) return;
 
@@ -318,6 +319,7 @@
       const form = new FormData();
       form.append('audio', blob, `chunk_${idx}.${ext}`);
       form.append('chunk_index', String(idx));
+      if (currentSessionId) form.append('session_id', currentSessionId);
 
       chunkStatus.textContent = `⟳ Transcribing chunk ${idx + 1}…`;
       chunkStatus.classList.remove('hidden');
@@ -325,15 +327,16 @@
       try {
         const res = await fetch('/transcribe-chunk', { method: 'POST', body: form });
         if (!res.ok) throw new Error(await res.text());
-        const { transcript } = await res.json();
+        const { transcript, session_id } = await res.json();
+        
+        if (!currentSessionId && session_id) currentSessionId = session_id;
+
         if (transcript) allTranscripts.push(transcript);
         chunkStatus.textContent = `✓ Chunk ${idx + 1} transcribed (${allTranscripts.length} total)`;
-        // Keep transcript up-to-date as we go
         transcriptDisplay.textContent = allTranscripts.join('\n\n');
       } catch (err) {
-        chunkStatus.textContent = `⚠ Chunk ${idx + 1} failed — audio saved locally`;
+        chunkStatus.textContent = `⚠ Chunk ${idx + 1} failed`;
         showToast(`Chunk ${idx + 1} transcription failed: ${err.message}`, 'error');
-        // Don't lose the audio — the blob is already gone but we've noted the failure
       }
     }
 
@@ -343,10 +346,7 @@
 
       chunkTimer = setInterval(async () => {
         if (!isRecording || !mediaRecorder) return;
-
-        // Pause → collect current data → resume
-        mediaRecorder.requestData(); // triggers 'dataavailable' synchronously on some browsers
-        // Give the event loop a tick, then flush
+        mediaRecorder.requestData(); 
         setTimeout(() => flushChunk(stream), 100);
       }, intervalMs);
     }
@@ -361,6 +361,7 @@
       allTranscripts = [];
       chunkBuffer    = [];
       chunkIndex     = 0;
+      currentSessionId = null; 
 
       let stream;
       try {
@@ -379,7 +380,6 @@
         if (e.data && e.data.size > 0) chunkBuffer.push(e.data);
       });
 
-      // requestData() every 10 s so we always have fresh data in the buffer
       mediaRecorder.start(10_000);
 
       setRecordingUI(true);
@@ -394,16 +394,14 @@
       stopTimerDisplay();
       stopChunkTimer();
 
-      // Collect final data
       mediaRecorder.requestData();
-      await new Promise(r => setTimeout(r, 150)); // small wait for dataavailable
+      await new Promise(r => setTimeout(r, 150)); 
 
       mediaRecorder.stop();
       mediaRecorder.stream.getTracks().forEach(t => t.stop());
 
       setProcessing(true, 'Transcribing final segment…');
 
-      // Flush final chunk
       if (chunkBuffer.length > 0) {
         await flushChunk(null);
       }
@@ -417,7 +415,6 @@
       const fullTranscript = allTranscripts.join('\n\n');
       transcriptDisplay.textContent = fullTranscript;
 
-      // Summarise
       setProcessing(true, 'Generating summary…');
       try {
         const res = await fetch('/summarise', {
@@ -426,6 +423,7 @@
           body: JSON.stringify({
             full_transcript: fullTranscript,
             model: modelSelect.value,
+            session_id: currentSessionId,
           }),
         });
         if (!res.ok) {
@@ -463,6 +461,7 @@
             current_summary: currentSummary,
             edit_prompt: editPrompt,
             model: modelSelect.value,
+            session_id: currentSessionId,
           }),
         });
         if (!res.ok) {
@@ -482,7 +481,6 @@
       }
     });
 
-    // Allow Enter to submit edit prompt
     editPromptInput.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); updateBtn.click(); }
     });
