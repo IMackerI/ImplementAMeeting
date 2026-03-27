@@ -223,11 +223,9 @@
 
     // --- State ---
     let mediaRecorder   = null;
-    let chunkBuffer     = [];      // audio chunks for current interval
     let allTranscripts  = [];      // accumulated transcript strings
     let chunkIndex      = 0;
     let timerInterval   = null;
-    let chunkTimer      = null;
     let secondsElapsed  = 0;
     let isRecording     = false;
     let currentSessionId = null;
@@ -308,14 +306,11 @@
     }
 
     // --- Flush a chunk ---
-    async function flushChunk(stream) {
-      if (chunkBuffer.length === 0) return;
-
-      const blob = new Blob(chunkBuffer, { type: mediaRecorder.mimeType || 'audio/webm' });
-      chunkBuffer = [];
+    async function flushChunk(blob) {
+      if (!blob || blob.size === 0) return;
 
       const idx = chunkIndex++;
-      const ext  = (mediaRecorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
+      const ext = (mediaRecorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
       const form = new FormData();
       form.append('audio', blob, `chunk_${idx}.${ext}`);
       form.append('chunk_index', String(idx));
@@ -326,43 +321,32 @@
 
       try {
         const res = await fetch('/transcribe-chunk', { method: 'POST', body: form });
-        if (!res.ok) throw new Error(await res.text());
-        const { transcript, session_id } = await res.json();
+        if (!res.ok) {
+          const content = await res.text();
+          throw new Error(content || res.statusText);
+        }
+        const data = await res.json();
         
-        if (!currentSessionId && session_id) currentSessionId = session_id;
+        if (!currentSessionId && data.session_id) {
+          currentSessionId = data.session_id;
+          console.log("Session started:", currentSessionId);
+          showToast(`Session started: ${currentSessionId}`, 'success');
+        }
 
-        if (transcript) allTranscripts.push(transcript);
+        if (data.transcript) {
+          allTranscripts.push(data.transcript);
+          transcriptDisplay.textContent = allTranscripts.join('\n\n');
+        }
         chunkStatus.textContent = `✓ Chunk ${idx + 1} transcribed (${allTranscripts.length} total)`;
-        transcriptDisplay.textContent = allTranscripts.join('\n\n');
       } catch (err) {
+        console.error("Transcription error:", err);
         chunkStatus.textContent = `⚠ Chunk ${idx + 1} failed`;
-        showToast(`Chunk ${idx + 1} transcription failed: ${err.message}`, 'error');
+        showToast(`Chunk ${idx + 1} failed: ${err.message}`, 'error');
       }
     }
 
-    // --- Schedule periodic chunk flushing ---
-    function startChunkTimer(stream) {
-      const intervalMs = Math.max(1, Number(chunkIntervalInput.value) || 5) * 60 * 1000;
-
-      chunkTimer = setInterval(async () => {
-        if (!isRecording || !mediaRecorder) return;
-        mediaRecorder.requestData(); 
-        setTimeout(() => flushChunk(stream), 100);
-      }, intervalMs);
-    }
-
-    function stopChunkTimer() {
-      clearInterval(chunkTimer);
-      chunkTimer = null;
-    }
-
     // --- Recording ---
-    startBtn.addEventListener('click', async () => {
-      allTranscripts = [];
-      chunkBuffer    = [];
-      chunkIndex     = 0;
-      currentSessionId = null; 
-
+    async function startRecordingFlow() {
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -375,16 +359,33 @@
         .find(m => m === '' || MediaRecorder.isTypeSupported(m));
 
       mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-
+      
+      let chunkCount = 0;
       mediaRecorder.addEventListener('dataavailable', e => {
-        if (e.data && e.data.size > 0) chunkBuffer.push(e.data);
+        if (e.data && e.data.size > 0) {
+          flushChunk(e.data);
+        }
       });
 
-      mediaRecorder.start(10_000);
-
+      mediaRecorder.start();
       setRecordingUI(true);
       startTimerDisplay();
-      startChunkTimer(stream);
+
+      // Periodic restart to keep chunks independent and valid
+      const intervalMs = Math.max(1, Number(chunkIntervalInput.value) || 1) * 60 * 1000;
+      chunkTimer = setInterval(() => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop(); 
+          mediaRecorder.start(); // Restart immediately
+        }
+      }, intervalMs);
+    }
+
+    startBtn.addEventListener('click', () => {
+      allTranscripts = [];
+      chunkIndex     = 0;
+      currentSessionId = null; 
+      startRecordingFlow();
     });
 
     stopBtn.addEventListener('click', async () => {
@@ -392,30 +393,25 @@
 
       setRecordingUI(false);
       stopTimerDisplay();
-      stopChunkTimer();
-
-      mediaRecorder.requestData();
-      await new Promise(r => setTimeout(r, 150)); 
+      if (chunkTimer) clearInterval(chunkTimer);
 
       mediaRecorder.stop();
       mediaRecorder.stream.getTracks().forEach(t => t.stop());
 
-      setProcessing(true, 'Transcribing final segment…');
-
-      if (chunkBuffer.length > 0) {
-        await flushChunk(null);
-      }
+      setProcessing(true, 'Finalizing transcription and generating summary…');
+      
+      // Wait a few seconds for final chunk to finish transcribing
+      await new Promise(r => setTimeout(r, 3000));
 
       if (allTranscripts.length === 0) {
         setProcessing(false);
-        showToast('No audio was captured or transcription failed.');
+        showToast('No audio transcribed yet. If you just stopped, wait a moment.');
         return;
       }
 
       const fullTranscript = allTranscripts.join('\n\n');
       transcriptDisplay.textContent = fullTranscript;
 
-      setProcessing(true, 'Generating summary…');
       try {
         const res = await fetch('/summarise', {
           method: 'POST',
@@ -427,8 +423,8 @@
           }),
         });
         if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.detail || res.statusText);
+          const errData = await res.json();
+          throw new Error(errData.detail || res.statusText);
         }
         const { summary } = await res.json();
         summaryTextarea.value = summary;

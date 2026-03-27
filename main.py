@@ -58,8 +58,12 @@ def fetch_available_models():
 AVAILABLE_MODELS = fetch_available_models()
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
-RECORDINGS_DIR = Path(__file__).parent / "recordings"
-RECORDINGS_DIR.mkdir(exist_ok=True)
+RECORDINGS_DIR = Path(__file__).parent.resolve() / "recordings"
+if not RECORDINGS_DIR.exists():
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Created recordings directory at: {RECORDINGS_DIR}")
+else:
+    print(f"Using recordings directory at: {RECORDINGS_DIR}")
 
 # ---------------------------------------------------------------------------
 # App
@@ -130,6 +134,13 @@ class TranscribeChunkResponse(BaseModel):
     session_id: str
 
 
+def sanitize_session_id(sid: str | None) -> str:
+    """Ensure session_id is a valid-ish string or generate a new one."""
+    if not sid or str(sid).lower() in ("null", "undefined", "none", ""):
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(sid).strip()
+
+
 @app.post("/transcribe-chunk")
 async def transcribe_chunk(
     audio: UploadFile = File(...),
@@ -139,9 +150,7 @@ async def transcribe_chunk(
     """
     Transcribe a single audio chunk and append it to the session's transcript file.
     """
-    if not session_id or session_id == "null":
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
+    sid = sanitize_session_id(session_id)
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file received.")
@@ -149,21 +158,28 @@ async def transcribe_chunk(
     try:
         transcript = await transcribe_audio(audio_bytes, audio.filename or f"chunk_{chunk_index}.webm")
     except Exception as exc:
+        # Check if it's already an HTTPException
+        if isinstance(exc, HTTPException): raise exc
+        print(f"ERROR: Whisper failed: {exc}")
         raise HTTPException(status_code=502, detail=f"Whisper error: {exc}") from exc
 
-    # Persist the transcript chunk
-    transcript_path = RECORDINGS_DIR / f"{session_id}_transcript.txt"
-    with open(transcript_path, "a", encoding="utf-8") as f:
-        f.write(f"--- Chunk {chunk_index} ({datetime.now().isoformat()}) ---\n")
-        f.write(transcript + "\n\n")
+    try:
+        # Persist the transcript chunk
+        transcript_path = RECORDINGS_DIR / f"{sid}_transcript.txt"
+        with open(transcript_path, "a", encoding="utf-8") as f:
+            f.write(f"--- Chunk {chunk_index} ({datetime.now().isoformat()}) ---\n")
+            f.write(str(transcript) + "\n\n")
+    except Exception as exc:
+        print(f"ERROR: Persistence failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Persistence error: {exc}")
 
-    return TranscribeChunkResponse(transcript=transcript, session_id=session_id)
+    return TranscribeChunkResponse(transcript=str(transcript), session_id=sid)
 
 
 class SummariseRequest(BaseModel):
     full_transcript: str
     model: str = DEFAULT_MODEL
-    session_id: str = None
+    session_id: str | None = None
 
 
 class SummariseResponse(BaseModel):
@@ -179,9 +195,7 @@ async def summarise(req: SummariseRequest) -> SummariseResponse:
         raise HTTPException(status_code=400, detail="Transcript is empty.")
 
     model_id = req.model if req.model in AVAILABLE_MODELS else DEFAULT_MODEL
-    
-    # Use existing session_id or create new one
-    sid = req.session_id or f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sid = sanitize_session_id(req.session_id)
 
     prompt = (
         "Below is the full transcript of a meeting. "
@@ -192,12 +206,18 @@ async def summarise(req: SummariseRequest) -> SummariseResponse:
     try:
         summary = gemini_generate(prompt, model_id)
     except Exception as exc:
+        if isinstance(exc, HTTPException): raise exc
+        print(f"ERROR: Gemini failed: {exc}")
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
-    # Persist the summary
-    summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
-    summary_path.write_text(summary, encoding="utf-8")
-
+    try:
+        # Persist the summary
+        summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
+        summary_path.write_text(summary, encoding="utf-8")
+    except Exception as exc:
+        print(f"ERROR: Summary persistence failed: {exc}")
+        # We still return the summary even if saving fails
+        
     return SummariseResponse(summary=summary)
 
 
@@ -205,7 +225,7 @@ class EditSummaryRequest(BaseModel):
     current_summary: str
     edit_prompt: str
     model: str = DEFAULT_MODEL
-    session_id: str = None
+    session_id: str | None = None
 
 
 class EditSummaryResponse(BaseModel):
@@ -223,7 +243,7 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
         raise HTTPException(status_code=400, detail="Edit prompt is empty.")
 
     model_id = req.model if req.model in AVAILABLE_MODELS else DEFAULT_MODEL
-    sid = req.session_id # Optional fallback
+    sid = sanitize_session_id(req.session_id)
 
     prompt = (
         "You are given an existing meeting summary and an editing instruction. "
@@ -236,11 +256,15 @@ async def edit_summary(req: EditSummaryRequest) -> EditSummaryResponse:
     try:
         new_summary = gemini_generate(prompt, model_id)
     except Exception as exc:
+        if isinstance(exc, HTTPException): raise exc
+        print(f"ERROR: Gemini edit failed: {exc}")
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
-    # Update persistent summary if session_id is available
-    if sid:
+    try:
+        # Update persistent summary
         summary_path = RECORDINGS_DIR / f"{sid}_summary.md"
         summary_path.write_text(new_summary, encoding="utf-8")
+    except Exception as exc:
+         print(f"ERROR: Edit persistence failed: {exc}")
 
     return EditSummaryResponse(summary=new_summary)
