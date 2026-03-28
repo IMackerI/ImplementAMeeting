@@ -33,6 +33,8 @@ List anything that was unresolved, needs further clarification, or poses a risk 
 ---
 
 ## Additional Guidelines
-- Do not invent information not present in the transcript.
+- Do not invent information not present in the transcript, pre-meeting context, or chat discussion.
+- The input may include pre-meeting context (notes, uploaded documents) and chat messages exchanged during the meeting. Use all available sources.
+- Chat messages interlaced with the transcript show real-time questions and discussions — they may clarify, expand, or supersede spoken content.
 - If the transcript is incomplete or unclear, note it explicitly under Open Questions.
 - Output only the structured report — no preamble, no sign-off.
