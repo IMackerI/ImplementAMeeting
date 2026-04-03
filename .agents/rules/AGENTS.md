@@ -1,3 +1,7 @@
+---
+trigger: always_on
+---
+
 # Meeting Co-Pilot Workspace (AGENTS.md)
 
 Welcome to the **Meeting Co-Pilot** repository. This project is a real-time meeting transcription, co-pilot assistant, and project management tool built with Agno, FastAPI, and Next.js.
@@ -7,25 +11,34 @@ Welcome to the **Meeting Co-Pilot** repository. This project is a real-time meet
 ### Backend (`/backend`)
 A FastAPI server hosting two specialized Agno Agents:
 1. **Meeting Co-Pilot**: Active participant during meetings.
-   - **Model**: OpenAI (GPT-4o-mini/GPT-4o).
+   - **Model**: Configurable per-meeting via `models_config.json` (default: GPT-4o-mini).
    - **Tools**: `DuckDuckGoTools` for real-time web search.
    - **Memory**: Persistent sessions via `agno.db.sqlite.SqliteDb`.
 2. **Project Manager (Summarizer)**: Post-meeting analysis.
-   - **Model**: OpenRouter (Gemini 2.1 Pro/GPT-4).
+   - **Model**: Configurable per-meeting via `models_config.json` (default: Gemini 2.5 Pro via OpenRouter).
    - **Purpose**: Generates a structured Markdown Implementation Plan from the transcript.
 
 #### Key Files:
 - `main.py`: FastAPI application & API endpoints.
 - `database.py`: SQLAlchemy models for business logic persistence.
-- `models.py`: Centralized model configurations.
+- `models.py`: Default model configurations (fallback if no per-meeting override).
+- `models_config.json`: **Edit this** to add/remove available model options shown in the UI dropdown.
 - `prompts.py`: System instructions for agents.
-- `agents/`: Implementation of specific Agno Agents.
+- `agents/copilot.py`: Copilot agent — accepts `context_text` and `model_id` overrides.
+- `agents/summarizer.py`: Summarizer agent — accepts `context_text` and `model_id` overrides.
+
+#### Database Schema (`app_data.db`, `meetings` table):
+- `id`, `title`, `created_at`, `is_active`, `summary_markdown`, `transcript`
+- `context_items` — JSON array of `{type, name, content}` objects
+- `copilot_model_id`, `summarizer_model_id` — per-meeting model overrides
 
 ### Frontend (`/frontend`)
 A modern **Next.js 16 (App Router)** interface.
 - **Styling**: Tailwind CSS 4 with a dark/glassmorphic premium design.
-* **Recording**: Continuous 20s chunking via `MediaRecorder` for background transcription and silent updates to the visual transcript.
-* **Push-To-Talk**: Interactive dialogue with the Agno Co-Pilot for immediate voice queries.
+- **Recording**: Continuous 20s chunking via `MediaRecorder` for background transcription.
+- **Push-To-Talk**: Interactive dialogue with the Agno Co-Pilot for immediate voice queries.
+- **Setup Screen**: `/meetings/new` — configure title, models, and context before starting.
+- **Context Panel**: Accessible during active meeting via sidebar toggle.
 
 ## 🛠️ Development & Environment
 
@@ -57,16 +70,41 @@ cd frontend
 bun dev
 ```
 
+## 📡 API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/meeting/create` | Create inactive meeting (setup phase) |
+| POST | `/api/meeting/{id}/start` | Activate meeting (start recording) |
+| PATCH | `/api/meetings/{id}` | Update title/model selections |
+| DELETE | `/api/meetings/{id}` | Remove meeting permanently |
+| POST | `/api/meetings/{id}/reactivate` | Re-open finished meeting; appends old summary |
+| POST | `/api/meeting/{id}/context/text` | Add text note to context |
+| POST | `/api/meeting/{id}/context/file` | Upload file → extract → add to context |
+| DELETE | `/api/meeting/{id}/context/{index}` | Remove context item |
+| GET | `/api/meeting/{id}/context` | List all context items |
+| GET | `/api/models` | Get available model options from models_config.json |
+| POST | `/api/meeting/transcript` | Append background audio chunk |
+| POST | `/api/chat/text` | Text query to copilot |
+| POST | `/api/chat/audio` | Audio query to copilot (PTT) |
+| POST | `/api/meeting/summarize` | End meeting & generate summary |
+| GET | `/api/meetings` | List all meetings |
+| GET | `/api/meetings/{id}` | Get meeting detail |
+
 ## 🧠 Best Practices
-- **Persistence**: Agent internal memory is in `agents.db`. Application metadata (Meeting titles, statuses, summaries) is in `app_data.db`.
-- **Transcription**: Background recording is silent and populates the `Live Transcript` on the left. Active "Push-to-Talk" triggers the Co-Pilot to answer questions on the right.
+- **Persistence**: Agent internal memory is in `agents.db`. Application metadata is in `app_data.db`.
+- **Context**: Context items are stored as JSON in `meeting.context_items` and injected into both copilot and summarizer prompts.
+- **Models**: Add/remove available models in `backend/models_config.json` — no code changes needed.
+- **Meeting Lifecycle**: `is_active=False` at creation → set `True` by `/start` → `False` by `/summarize` → can be re-`True` by `/reactivate`.
+- **Pause**: Frontend-only state — sets `isPausedRef` to skip sending background chunks. No backend change.
 - **Agno Usage**: Always check the session ID (`id` from URL) to maintain conversation context with the Agno Co-Pilot.
 
 ## ⚠️ Notes for Agents
-- If modifying the backend models, update `backend/models.py`.
-- For UI enhancements, use the Tailwind `glass` or `gradient-text` utility classes defined in `globals.css`.
-- Whisper is used via the direct OpenAI transcription API (`whisper-1`).
-- **Agno `SqliteDb.get_sessions()`** requires a `session_type` parameter — raises `ValueError: Invalid session type: None` without it. To read copilot session data, query `agents.db` directly via `sqlite3`: the `copilot_sessions` table has a `runs` JSON column (array of run objects, each with a `content` field containing the copilot's response text). `get_messages()` does **not** exist on `SqliteDb`.
-- **Chat panel expand button** must be rendered *outside* the `<motion.section overflow-hidden>` container — otherwise it's clipped at width=0. Position it absolutely relative to the parent `<main>`.
-- **Polling & view state**: The polling interval fires `fetchMeeting` every 5s which can revert user navigation (e.g. re-showing summary after user clicked to transcript). Use a `useRef` flag to track intentional user navigation; stop polling once `is_active === false`.
-- **Background recorder cleanup**: Always call `stream.getTracks().forEach(t => t.stop())` on meeting end to release the microphone. Guard transcript submissions on both the frontend `isMeetingActiveRef` and the backend `is_active` check.
+- No backward compatibility needed — prune unused features freely.
+- **DB migrations**: When adding columns to `Meeting`, run a manual ALTER TABLE (SQLAlchemy doesn't do migrations). Use plain `python3` (not `uv run`) if in the sandbox (uv cache may be read-only).
+- **Agno `SqliteDb.get_sessions()`** requires a `session_type` parameter. Query `agents.db` directly via `sqlite3`: `copilot_sessions` table has `runs` JSON column.
+- **Chat panel expand button** must be rendered *outside* the `<motion.section overflow-hidden>` container — otherwise it's clipped at width=0.
+- **Polling & view state**: Use `useRef` flags to track intentional user navigation; stop polling once `is_active === false`.
+- **Background recorder cleanup**: Always call `stream.getTracks().forEach(t => t.stop())` on meeting end.
+- **Context panel** is a separate `<motion.aside>` rendered between the transcript section and the chat sidebar.
+- **Reactivate**: Appends old summary to transcript with a `⟳ Meeting Resumed` separator, then clears `summary_markdown` so the UI doesn't auto-switch back to summary view.

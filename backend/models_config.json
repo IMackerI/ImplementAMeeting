@@ -1,0 +1,61 @@
+{
+  "copilot_models": [
+    {
+      "id": "gpt-4o-mini",
+      "provider": "openai",
+      "display_name": "GPT-4o Mini (Fast)"
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "display_name": "GPT-4o (Smart)"
+    },
+    {
+      "id": "openai/gpt-4.1",
+      "provider": "openrouter",
+      "display_name": "GPT-4.1 via OpenRouter"
+    },
+    {
+      "id": "google/gemini-2.0-flash-001",
+      "provider": "openrouter",
+      "display_name": "Gemini 2.0 Flash via OpenRouter"
+    },
+    {
+      "id": "google/gemini-2.5-pro",
+      "provider": "openrouter",
+      "display_name": "Gemini 2.5 Pro via OpenRouter"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4-5",
+      "provider": "openrouter",
+      "display_name": "Claude Sonnet 4.5 via OpenRouter"
+    }
+  ],
+  "summarizer_models": [
+    {
+      "id": "google/gemini-2.5-pro",
+      "provider": "openrouter",
+      "display_name": "Gemini 2.5 Pro (Recommended)"
+    },
+    {
+      "id": "openai/gpt-4o",
+      "provider": "openrouter",
+      "display_name": "GPT-4o via OpenRouter"
+    },
+    {
+      "id": "openai/gpt-4.1",
+      "provider": "openrouter",
+      "display_name": "GPT-4.1 via OpenRouter"
+    },
+    {
+      "id": "anthropic/claude-opus-4-5",
+      "provider": "openrouter",
+      "display_name": "Claude Opus 4.5 via OpenRouter"
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "display_name": "GPT-4o (Direct OpenAI)"
+    }
+  ]
+}

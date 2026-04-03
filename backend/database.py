@@ -16,9 +16,14 @@ class Meeting(Base):
     id = Column(String, primary_key=True, index=True)
     title = Column(String, default="Meeting")
     created_at = Column(DateTime, default=datetime.utcnow)
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=False)  # starts inactive until explicitly started
     summary_markdown = Column(Text, nullable=True)
     transcript = Column(Text, default="")
+    # JSON array of {"type": "text"|"file", "name": str, "content": str}
+    context_items = Column(Text, default="[]")
+    # Model overrides (store model ids as strings)
+    copilot_model_id = Column(String, nullable=True)
+    summarizer_model_id = Column(String, nullable=True)
 
 Base.metadata.create_all(bind=engine)
 
