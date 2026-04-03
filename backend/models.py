@@ -4,6 +4,9 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 
 load_dotenv(".env")
+if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPEN_AI_SECRET_KEY"):
+    load_dotenv("../.env")
+
 
 COPILOT_MODEL = OpenAIChat(
     id="gpt-4o-mini", # or "gpt-4o"

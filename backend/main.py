@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# Search for .env from backend up to root
 load_dotenv(".env")
+if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPEN_AI_SECRET_KEY"):
+    load_dotenv("../.env")
+
 
 from database import Meeting, get_db
 from agents.copilot import get_copilot_agent, agent_db
