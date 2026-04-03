@@ -1,1 +1,0 @@
-.venv/bin/uvicorn app:app --port 8765 --reload

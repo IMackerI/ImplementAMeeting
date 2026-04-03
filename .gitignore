@@ -21,4 +21,6 @@ Thumbs.db
 *.swp
 *.swo
 
-recordings/
+old_app/
+backend/app_data.db
+backend/agents.db
