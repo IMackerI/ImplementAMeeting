@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from openai import OpenAI
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Search for .env from backend up to root
 load_dotenv(".env")
@@ -60,14 +61,17 @@ def chat_text(req: ChatTextRequest, db: Session = Depends(get_db)):
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
         
-    # Append message to transcript
-    meeting.transcript += f"\nUser: {req.message}\n"
+    ts = datetime.now().strftime("%H:%M:%S")
+    meeting.transcript += f"\n\n**[{ts}] User Query:** {req.message}\n"
+
     
-    agent = get_copilot_agent(req.session_id)
+    agent = get_copilot_agent(req.session_id, transcript=meeting.transcript)
     response = agent.run(req.message)
+
     content = response.content if hasattr(response, 'content') else str(response)
     
-    meeting.transcript += f"Copilot: {content}\n"
+    meeting.transcript += f"\n**Copilot Response:**\n\n{content}\n\n---"
+
     db.commit()
     
     return {"response": content}
@@ -101,13 +105,18 @@ def chat_audio(session_id: str = Form(...), file: UploadFile = File(...), db: Se
     if not text:
         return {"response": ""}
 
-    meeting.transcript += f"\nSpoken (User): {text}\n"
+    ts = datetime.now().strftime("%H:%M:%S")
+    meeting.transcript += f"\n\n**[{ts}] User Query:** {text}\n"
 
-    agent = get_copilot_agent(session_id)
+
+    agent = get_copilot_agent(session_id, transcript=meeting.transcript)
     response = agent.run(text)
+
     content = response.content if hasattr(response, 'content') else str(response)
     
-    meeting.transcript += f"Copilot: {content}\n"
+    meeting.transcript += f"\n**Copilot Response:**\n\n{content}\n\n---"
+
+
     db.commit()
     
     return {"response": content}
@@ -117,6 +126,11 @@ def meeting_transcript(session_id: str = Form(...), file: UploadFile = File(...)
     meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    if not meeting.is_active:
+        # Return 200 (not an error) so the frontend's .then(() => fetchMeeting()) still fires,
+        # which corrects isMeetingActiveRef and stops any further recordings.
+        # A 409 would cause Axios to throw, skipping fetchMeeting and leaving the ref stale.
+        return {"response": ""}
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
         tmp.write(file.file.read())
@@ -138,8 +152,10 @@ def meeting_transcript(session_id: str = Form(...), file: UploadFile = File(...)
 
 
     if text:
-        meeting.transcript += f" {text}"
+        ts = datetime.now().strftime("%H:%M:%S")
+        meeting.transcript += f"\n\n**[{ts}]** {text}"
         db.commit()
+
 
     return {"response": text}
 
@@ -149,18 +165,45 @@ def summarize_meeting(session_id: str, db: Session = Depends(get_db)):
     meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-        
-    transcript = meeting.transcript
-    
-    if len(transcript.strip()) < 10:
-        summary = "No meaningful discussion occurred in this meeting."
-    else:
-        summary = run_summarizer(transcript=transcript, chat_history="")
-        
-    meeting.summary_markdown = summary
+
+    # Mark as inactive first so background recorder stops sending
     meeting.is_active = False
     db.commit()
-    
+
+    transcript = meeting.transcript
+
+    # Fetch copilot conversation history by reading agents.db directly.
+    # The `runs` column stores a JSON array of run objects, each with a `content` field.
+    chat_history = ""
+    try:
+        import sqlite3 as _sqlite3
+        import json as _json
+        with _sqlite3.connect("agents.db") as _conn:
+            _cur = _conn.cursor()
+            _cur.execute(
+                "SELECT runs FROM copilot_sessions WHERE session_id = ?",
+                (session_id,)
+            )
+            _row = _cur.fetchone()
+        if _row and _row[0]:
+            _runs = _json.loads(_row[0])
+            _lines = []
+            for _run in _runs:
+                _content = _run.get("content", "")
+                if _content:
+                    _lines.append(f"**Copilot**: {_content}")
+            chat_history = "\n\n".join(_lines)
+    except Exception as e:
+        print(f"Could not fetch copilot history: {e}")
+
+    if len(transcript.strip()) < 10 and not chat_history:
+        summary = "No meaningful discussion occurred in this meeting."
+    else:
+        summary = run_summarizer(transcript=transcript, chat_history=chat_history)
+
+    meeting.summary_markdown = summary
+    db.commit()
+
     return {"summary_markdown": summary}
 
 @app.get("/api/meetings")

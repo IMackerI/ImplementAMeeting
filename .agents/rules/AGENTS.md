@@ -66,3 +66,7 @@ bun dev
 - If modifying the backend models, update `backend/models.py`.
 - For UI enhancements, use the Tailwind `glass` or `gradient-text` utility classes defined in `globals.css`.
 - Whisper is used via the direct OpenAI transcription API (`whisper-1`).
+- **Agno `SqliteDb.get_sessions()`** requires a `session_type` parameter — raises `ValueError: Invalid session type: None` without it. To read copilot session data, query `agents.db` directly via `sqlite3`: the `copilot_sessions` table has a `runs` JSON column (array of run objects, each with a `content` field containing the copilot's response text). `get_messages()` does **not** exist on `SqliteDb`.
+- **Chat panel expand button** must be rendered *outside* the `<motion.section overflow-hidden>` container — otherwise it's clipped at width=0. Position it absolutely relative to the parent `<main>`.
+- **Polling & view state**: The polling interval fires `fetchMeeting` every 5s which can revert user navigation (e.g. re-showing summary after user clicked to transcript). Use a `useRef` flag to track intentional user navigation; stop polling once `is_active === false`.
+- **Background recorder cleanup**: Always call `stream.getTracks().forEach(t => t.stop())` on meeting end to release the microphone. Guard transcript submissions on both the frontend `isMeetingActiveRef` and the backend `is_active` check.

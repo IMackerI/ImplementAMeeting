@@ -24,3 +24,6 @@ Thumbs.db
 old_app/
 backend/app_data.db
 backend/agents.db
+
+backend.log
+frontend.log

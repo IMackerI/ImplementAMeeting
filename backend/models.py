@@ -15,5 +15,6 @@ COPILOT_MODEL = OpenAIChat(
 
 SUMMARIZER_MODEL = OpenRouter(
     id="google/gemini-2.5-pro", # A strong summarization model, or gpt-4o via openrouter
-    api_key=os.environ.get("OPENROUTER_API_KEY", "")
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+    max_tokens=8192,
 )
