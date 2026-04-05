@@ -38,9 +38,16 @@ export type MeetingDetail = MeetingListItem & {
   context_items: ContextItem[];
 };
 
+export type ToolCallEvent = {
+  type: 'call' | 'result';
+  tool_name?: string | null;
+  tool_args?: Record<string, unknown> | string | null;
+  content?: string | null;
+};
+
 export type ChatResponse = {
   response: string;
-  tool_calls?: any[];
+  tool_calls?: ToolCallEvent[];
   transcription_ok?: boolean;
   transcription_error?: string | null;
 };

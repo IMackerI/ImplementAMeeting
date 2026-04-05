@@ -15,18 +15,19 @@ import {
   sendChatText,
   summarizeMeeting,
   type SummaryVersion,
+  type ToolCallEvent,
   updateMeeting,
 } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import {
-  Mic, Send,
+  Mic, MicOff, Send,
   FileText, Activity, Search, CheckCircle2,
-  Home, ChevronRight, X, Pause, Play,
+  Home, ChevronRight, X,
   Upload, Plus, File as FileIcon, PanelRightOpen,
   RotateCcw, Pencil, Check, Copy, Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import { nextViewedSummary, shouldAutoSwitchToSummary } from '@/lib/meetingSessionState';
 
 type ContextItem = { type: 'text' | 'file'; name: string; content: string };
@@ -41,7 +42,38 @@ type MeetingData = {
   copilot_model_id: string | null;
   summarizer_model_id: string | null;
 };
-type ChatMessage = { role: 'user' | 'assistant'; text: string; tool_calls?: any[] };
+type ChatMessage = { role: 'user' | 'assistant'; text: string; tool_calls?: ToolCallEvent[] };
+
+const chatMarkdownComponents: Components = {
+  a: ({ href, children, ...props }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-300 underline underline-offset-2 decoration-blue-400/60 hover:text-blue-200 break-all"
+      {...props}
+    >
+      {children}
+    </a>
+  ),
+};
+
+const getToolCallSummary = (toolCall: ToolCallEvent) => {
+  const toolName = toolCall?.tool_name || 'tool';
+  const args = toolCall?.tool_args;
+
+  if (args && typeof args === 'object') {
+    const query = args.query || args.keywords || args.text || args.prompt;
+    if (query) return `${toolName}: ${String(query)}`;
+    return `${toolName}: ${JSON.stringify(args)}`;
+  }
+
+  if (typeof args === 'string' && args.trim()) {
+    return `${toolName}: ${args}`;
+  }
+
+  return toolName;
+};
 
 export default function MeetingSession({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -49,10 +81,13 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
 
   const [meeting, setMeeting] = useState<MeetingData | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [hasLoadedChatMessages, setHasLoadedChatMessages] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [isBackgroundRecording, setIsBackgroundRecording] = useState(false);
   const [viewedSummary, setViewedSummary] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
@@ -84,14 +119,18 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   const bgUploadInFlightRef = useRef(false);
   const isPttActiveRef = useRef(false);
 
-  const isMeetingActiveRef = useRef(true);
-  const isPausedRef = useRef(false);
+  const isMeetingActiveRef = useRef(false);
+  const isMutedRef = useRef(false);
   const suppressBgChunkRef = useRef(false);
   const userChoseTranscriptRef = useRef(false);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const loadedChatStorageKeyRef = useRef<string>('');
+
+  const micMutedStorageKey = `meeting:${id}:mic-muted`;
+  const chatMessagesStorageKey = `meeting:${id}:chat-messages`;
 
   // ---------------------------------------------------------------------------
   // Data fetching
@@ -141,6 +180,58 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   useEffect(() => { transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [meeting?.transcript]);
   useEffect(() => { if (isEditingTitle && titleInputRef.current) titleInputRef.current.focus(); }, [isEditingTitle]);
 
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(micMutedStorageKey) === '1';
+      setIsMuted(stored);
+      isMutedRef.current = stored;
+    } catch {
+      setIsMuted(false);
+      isMutedRef.current = false;
+    }
+  }, [micMutedStorageKey]);
+
+  useEffect(() => {
+    setHasLoadedChatMessages(false);
+    loadedChatStorageKeyRef.current = '';
+
+    try {
+      const raw = window.localStorage.getItem(chatMessagesStorageKey);
+      if (!raw) {
+        setMessages([]);
+      } else {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const restored: ChatMessage[] = parsed
+            .filter((item) => item && (item.role === 'user' || item.role === 'assistant') && typeof item.text === 'string')
+            .map((item) => ({
+              role: item.role,
+              text: item.text,
+              tool_calls: Array.isArray(item.tool_calls) ? item.tool_calls : undefined,
+            }));
+          setMessages(restored);
+        } else {
+          setMessages([]);
+        }
+      }
+    } catch {
+      setMessages([]);
+    } finally {
+      loadedChatStorageKeyRef.current = chatMessagesStorageKey;
+      setHasLoadedChatMessages(true);
+    }
+  }, [chatMessagesStorageKey]);
+
+  useEffect(() => {
+    if (!hasLoadedChatMessages || loadedChatStorageKeyRef.current !== chatMessagesStorageKey) return;
+    try {
+      const trimmed = messages.slice(-120);
+      window.localStorage.setItem(chatMessagesStorageKey, JSON.stringify(trimmed));
+    } catch {
+      // ignore storage issues
+    }
+  }, [chatMessagesStorageKey, hasLoadedChatMessages, messages]);
+
   // ---------------------------------------------------------------------------
   // Recording helpers (background + PTT)
   // ---------------------------------------------------------------------------
@@ -173,6 +264,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
 
   const stopBackgroundLoop = useCallback((discardCurrentChunk = false, releaseStream = false) => {
     bgLoopActiveRef.current = false;
+    setIsBackgroundRecording(false);
     clearBackgroundTimers();
 
     if (discardCurrentChunk) {
@@ -191,7 +283,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   }, [clearBackgroundTimers, releaseBackgroundStream]);
 
   const startBackgroundRecording = useCallback(async () => {
-    if (!isMeetingActiveRef.current || isPausedRef.current || isPttActiveRef.current || bgLoopActiveRef.current) {
+    if (!isMeetingActiveRef.current || isMutedRef.current || isPttActiveRef.current || bgLoopActiveRef.current) {
       return;
     }
 
@@ -201,9 +293,14 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
       }
 
       const stream = bgStreamRef.current;
-      if (!stream) return;
+      if (!stream) {
+        setIsBackgroundRecording(false);
+        return;
+      }
 
+      setMicError(null);
       bgLoopActiveRef.current = true;
+      setIsBackgroundRecording(true);
 
       const recordChunk = () => {
         if (!bgLoopActiveRef.current) return;
@@ -213,7 +310,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
           return;
         }
 
-        if (isPausedRef.current || isPttActiveRef.current) {
+        if (isMutedRef.current || isPttActiveRef.current) {
           clearBackgroundTimers();
           bgNextChunkTimerRef.current = setTimeout(recordChunk, 350);
           return;
@@ -246,7 +343,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
             shouldSend &&
             blob.size > 1024 &&
             isMeetingActiveRef.current &&
-            !isPausedRef.current &&
+            !isMutedRef.current &&
             !isPttActiveRef.current;
 
           if (shouldUpload && !bgUploadInFlightRef.current) {
@@ -279,34 +376,45 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
       recordChunk();
     } catch (err) {
       console.error('Failed to start background recording:', err);
+      setMicError('Microphone unavailable or blocked.');
       bgLoopActiveRef.current = false;
+      setIsBackgroundRecording(false);
     }
   }, [clearBackgroundTimers, fetchMeeting, id, pickRecorderMimeType, stopBackgroundLoop]);
 
-  const handlePauseResume = () => {
-    const nowPaused = !isPaused;
-    setIsPaused(nowPaused);
-    isPausedRef.current = nowPaused;
+  const handleMuteToggle = useCallback(() => {
+    const nowMuted = !isMutedRef.current;
+    setIsMuted(nowMuted);
+    isMutedRef.current = nowMuted;
 
-    if (nowPaused) {
-      stopBackgroundLoop(true, false);
+    try {
+      window.localStorage.setItem(micMutedStorageKey, nowMuted ? '1' : '0');
+    } catch {
+      // ignore storage issues
+    }
+
+    if (nowMuted) {
+      stopBackgroundLoop(true, true);
       return;
     }
 
-    startBackgroundRecording();
-  };
+    if (meeting?.is_active) {
+      startBackgroundRecording();
+    }
+  }, [meeting?.is_active, micMutedStorageKey, startBackgroundRecording, stopBackgroundLoop]);
 
   // ---------------------------------------------------------------------------
   // PTT recording
   // ---------------------------------------------------------------------------
   const startRecording = async () => {
-    if (!meeting?.is_active || isRecording || isProcessing) return;
+    if (!meeting?.is_active || isMutedRef.current || isRecording || isProcessing) return;
 
     try {
       isPttActiveRef.current = true;
       stopBackgroundLoop(true, false);
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setMicError(null);
       const preferredMimeType = pickRecorderMimeType();
       const recorder = preferredMimeType
         ? new MediaRecorder(stream, { mimeType: preferredMimeType })
@@ -331,7 +439,9 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
         isPttActiveRef.current = false;
 
         if (audioBlob.size < 1024) {
-          startBackgroundRecording();
+          if (isMeetingActiveRef.current && !isMutedRef.current) {
+            startBackgroundRecording();
+          }
           return;
         }
 
@@ -349,7 +459,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
           console.error('Audio transcription error:', err);
         } finally {
           setIsProcessing(false);
-          if (isMeetingActiveRef.current && !isPausedRef.current) {
+          if (isMeetingActiveRef.current && !isMutedRef.current) {
             startBackgroundRecording();
           }
         }
@@ -359,8 +469,11 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
       setIsRecording(true);
     } catch (err) {
       isPttActiveRef.current = false;
+      setMicError('Microphone unavailable or blocked.');
       console.error('Failed to start recording:', err);
-      startBackgroundRecording();
+      if (isMeetingActiveRef.current && !isMutedRef.current) {
+        startBackgroundRecording();
+      }
     }
   };
 
@@ -375,9 +488,36 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   };
 
   useEffect(() => {
-    fetchMeeting();
+    const handleVisibilityChange = () => {
+      if (!document.hidden) return;
+      if (!isMeetingActiveRef.current || isMutedRef.current) return;
+
+      setIsMuted(true);
+      isMutedRef.current = true;
+
+      try {
+        window.localStorage.setItem(micMutedStorageKey, '1');
+      } catch {
+        // ignore storage issues
+      }
+
+      stopBackgroundLoop(true, true);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [micMutedStorageKey, stopBackgroundLoop]);
+
+  useEffect(() => {
+    fetchMeeting().then(() => {
+      if (isMeetingActiveRef.current && !isMutedRef.current) {
+        startBackgroundRecording();
+      }
+    });
     pollIntervalRef.current = setInterval(fetchMeeting, 5000);
-    startBackgroundRecording();
 
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
@@ -434,15 +574,15 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
       setViewedSummary(false);
       userChoseTranscriptRef.current = false;
       isMeetingActiveRef.current = true;
-      isPausedRef.current = false;
-      setIsPaused(false);
       stopBackgroundLoop(true, false);
       await fetchMeeting();
       // Restart polling and recording
       if (!pollIntervalRef.current) {
         pollIntervalRef.current = setInterval(fetchMeeting, 5000);
       }
-      startBackgroundRecording();
+      if (!isMutedRef.current) {
+        startBackgroundRecording();
+      }
     } catch (err) {
       console.error('Error continuing meeting:', err);
     } finally {
@@ -617,10 +757,10 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
           )}
 
           {meeting.is_active ? (
-            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border shadow-lg ${isPaused ? 'bg-amber-500/10 border-amber-500/20' : 'bg-blue-500/10 border-blue-500/20 shadow-blue-500/5'}`}>
-              <span className={`h-2 w-2 rounded-full ${isPaused ? 'bg-amber-500' : 'bg-blue-500 animate-pulse'}`} />
-              <span className={`text-[10px] font-black uppercase tracking-widest ${isPaused ? 'text-amber-500' : 'text-blue-500'}`}>
-                {isPaused ? 'Paused' : 'Listening'}
+            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border shadow-lg ${isMuted ? 'bg-amber-500/10 border-amber-500/20' : micError ? 'bg-red-500/10 border-red-500/20' : isBackgroundRecording || isRecording ? 'bg-blue-500/10 border-blue-500/20 shadow-blue-500/5' : 'bg-zinc-800/50 border-white/10'}`}>
+              <span className={`h-2 w-2 rounded-full ${isMuted ? 'bg-amber-500' : micError ? 'bg-red-500' : isBackgroundRecording || isRecording ? 'bg-blue-500 animate-pulse' : 'bg-zinc-500'}`} />
+              <span className={`text-[10px] font-black uppercase tracking-widest ${isMuted ? 'text-amber-500' : micError ? 'text-red-400' : isBackgroundRecording || isRecording ? 'text-blue-500' : 'text-zinc-400'}`}>
+                {isMuted ? 'Muted' : micError ? 'Mic blocked' : isBackgroundRecording || isRecording ? 'Listening' : 'Idle'}
               </span>
             </div>
           ) : (
@@ -648,31 +788,12 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
             <PanelRightOpen size={20} />
           </button>
 
-          {meeting.is_active && (
-            <button
-              onClick={handlePauseResume}
-              className={`p-2 rounded-xl transition-all ${isPaused ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30' : 'hover:bg-white/5 text-zinc-500 hover:text-amber-400'}`}
-              title={isPaused ? 'Resume recording' : 'Pause recording'}
-            >
-              {isPaused ? <Play size={20} /> : <Pause size={20} />}
-            </button>
-          )}
-
-          {meeting.is_active && (
-            <button
-              onClick={handleEndMeeting}
-              className="bg-zinc-100 text-black px-5 py-2 rounded-xl text-xs font-black hover:bg-white transition-all hover:shadow-xl hover:shadow-white/10 disabled:opacity-50 uppercase tracking-widest"
-              disabled={isProcessing}
-            >
-              Finish & Summarize
-            </button>
-          )}
         </div>
       </nav>
 
       <main className="flex-1 flex overflow-hidden relative">
         {/* Main Content Area: Summary OR Transcript */}
-        <section className="flex-1 flex flex-col min-w-0 bg-[#050505]">
+        <section className="relative flex-1 flex flex-col min-w-0 bg-[#050505]">
           <div className="p-6 border-b border-white/5 flex justify-between items-center bg-black/40 backdrop-blur-sm">
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-lg ${viewedSummary ? 'bg-blue-500' : 'bg-zinc-800'}`}>
@@ -771,7 +892,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-12 space-y-8 scroll-smooth selection:bg-blue-500/30">
+          <div className="flex-1 overflow-y-auto p-12 pb-36 space-y-8 scroll-smooth selection:bg-blue-500/30">
             {viewedSummary && meeting.summary_markdown ? (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -797,6 +918,29 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
               </div>
             )}
           </div>
+
+          {meeting.is_active && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-5 z-20 flex justify-center px-6">
+              <div className="pointer-events-auto inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-black/80 backdrop-blur-md p-2 shadow-2xl">
+                <button
+                  onClick={handleMuteToggle}
+                  className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl border text-xs font-black uppercase tracking-widest transition-all ${isMuted ? 'bg-amber-500/20 border-amber-400/30 text-amber-300 hover:bg-amber-500/30' : 'bg-zinc-900 border-white/10 text-zinc-300 hover:bg-zinc-800 hover:text-white'}`}
+                  title={isMuted ? 'Microphone is muted' : 'Microphone is live'}
+                >
+                  {isMuted ? <MicOff size={14} /> : <Mic size={14} />}
+                  <span>{isMuted ? 'Mic Muted' : 'Mic Live'}</span>
+                </button>
+
+                <button
+                  onClick={handleEndMeeting}
+                  className="inline-flex items-center justify-center gap-2 bg-zinc-100 text-black px-4 py-2 rounded-xl text-xs font-black hover:bg-white transition-all disabled:opacity-50 uppercase tracking-widest"
+                  disabled={isProcessing}
+                >
+                  Finish & Summarize
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Context Panel */}
@@ -929,9 +1073,9 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
                 <div>
                   <h3 className="font-bold text-sm">Meeting Co-Pilot</h3>
                   <div className="flex items-center gap-2">
-                    <div className={`h-1.5 w-1.5 rounded-full ${meeting.is_active && !isPaused ? 'bg-green-500' : isPaused ? 'bg-amber-500' : 'bg-zinc-700'}`} />
+                    <div className={`h-1.5 w-1.5 rounded-full ${!meeting.is_active ? 'bg-zinc-700' : isMuted ? 'bg-amber-500' : micError ? 'bg-red-500' : isBackgroundRecording || isRecording ? 'bg-green-500' : 'bg-zinc-500'}`} />
                     <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">
-                      {!meeting.is_active ? 'Session Ended' : isPaused ? 'Paused' : 'Online'}
+                      {!meeting.is_active ? 'Session Ended' : isMuted ? 'Muted' : micError ? 'Mic blocked' : isBackgroundRecording || isRecording ? 'Online' : 'Idle'}
                     </span>
                   </div>
                 </div>
@@ -951,30 +1095,52 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
                     <p className="text-xs font-medium uppercase tracking-widest">Ask for research, facts, or meeting details</p>
                   </div>
                 )}
-                {messages.map((m, idx) => (
-                  <motion.div
-                    key={idx}
-                    initial={{ opacity: 0, x: m.role === 'user' ? 20 : -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div className={`max-w-[90%] p-4 rounded-2xl ${m.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none shadow-lg shadow-blue-600/10' : 'bg-white/5 border border-white/5 rounded-tl-none text-zinc-200'}`}>
-                      {m.tool_calls && m.tool_calls.length > 0 && (
-                        <div className="mb-4 space-y-1.5">
-                          {m.tool_calls.filter(tc => tc.type === 'call').map((tc, tcIdx) => (
-                            <div key={tcIdx} className="flex items-center gap-2 text-[10px] font-black text-blue-400/80 uppercase tracking-[0.1em] bg-blue-500/5 py-1.5 px-2.5 rounded-lg border border-blue-500/10 w-fit">
-                              <Search size={10} className="text-blue-500" />
-                              <span>{tc.tool_name === 'web_search' ? 'Searching' : tc.tool_name}: {tc.tool_args?.query || tc.tool_args?.keywords || JSON.stringify(tc.tool_args)}</span>
+                {messages.map((m, idx) => {
+                  const toolCalls = (m.tool_calls ?? []).filter((tc) => tc?.type === 'call');
+                  const hasToolCalls = toolCalls.length > 0;
+
+                  return (
+                    <motion.div
+                      key={idx}
+                      initial={{ opacity: 0, x: m.role === 'user' ? 20 : -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div className={`max-w-[92%] p-4 rounded-2xl ${m.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none shadow-lg shadow-blue-600/10' : 'bg-white/5 border border-white/10 rounded-tl-none text-zinc-100'}`}>
+                        {m.role === 'assistant' ? (
+                          <div className="space-y-3">
+                            {hasToolCalls && (
+                              <div className="space-y-2">
+                                <p className="text-[10px] uppercase tracking-[0.15em] font-black text-blue-300/80">Actions</p>
+                                <div className="space-y-1.5">
+                                  {toolCalls.map((tc, tcIdx) => (
+                                    <div key={tcIdx} className="flex items-center gap-2 text-[10px] font-black text-blue-200 uppercase tracking-[0.08em] bg-blue-500/10 py-1.5 px-2.5 rounded-lg border border-blue-400/20 w-fit max-w-full">
+                                      <Search size={10} className="text-blue-300 shrink-0" />
+                                      <span className="truncate">{getToolCallSummary(tc)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className={hasToolCalls ? 'pt-3 border-t border-white/10' : ''}>
+                              {hasToolCalls && (
+                                <p className="text-[10px] uppercase tracking-[0.15em] font-black text-zinc-500 mb-2">Response</p>
+                              )}
+                              <div className="prose prose-sm prose-invert max-w-none prose-p:text-zinc-200 prose-headings:text-zinc-100 prose-strong:text-blue-300">
+                                <ReactMarkdown components={chatMarkdownComponents}>{m.text}</ReactMarkdown>
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="prose prose-sm prose-invert max-w-none">
-                        <ReactMarkdown>{m.text}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          <div className="prose prose-sm prose-invert max-w-none prose-p:text-white">
+                            <ReactMarkdown components={chatMarkdownComponents}>{m.text}</ReactMarkdown>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  </motion.div>
-                ))}
+                    </motion.div>
+                  );
+                })}
                 {isProcessing && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
                     <div className="bg-white/5 p-4 rounded-2xl rounded-tl-none border border-white/10">
@@ -1016,13 +1182,13 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
                   onMouseDown={startRecording}
                   onMouseUp={stopRecording}
                   onMouseLeave={isRecording ? stopRecording : undefined}
-                  disabled={!meeting.is_active}
-                  className={`h-20 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden group ${isRecording ? 'bg-red-500 shadow-2xl shadow-red-500/30 scale-[0.98]' : 'bg-zinc-900 hover:bg-zinc-900/80 border border-white/5 hover:border-white/10'}`}
+                  disabled={!meeting.is_active || isMuted}
+                  className={`h-20 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed ${isRecording ? 'bg-red-500 shadow-2xl shadow-red-500/30 scale-[0.98]' : isMuted ? 'bg-zinc-900/70 border border-white/5' : 'bg-zinc-900 hover:bg-zinc-900/80 border border-white/5 hover:border-white/10'}`}
                 >
                   <div className="z-10 flex flex-col items-center">
-                    <Mic size={24} className={isRecording ? 'text-white' : 'text-zinc-500 group-hover:text-blue-400 transition-colors'} />
-                    <span className={`text-[10px] font-black uppercase tracking-[0.2em] mt-1.5 ${isRecording ? 'text-white' : 'text-zinc-600 group-hover:text-zinc-400'}`}>
-                      {isRecording ? 'Listening...' : 'Push to Talk'}
+                    <Mic size={24} className={isRecording ? 'text-white' : isMuted ? 'text-zinc-700' : 'text-zinc-500 group-hover:text-blue-400 transition-colors'} />
+                    <span className={`text-[10px] font-black uppercase tracking-[0.2em] mt-1.5 ${isRecording ? 'text-white' : isMuted ? 'text-zinc-700' : 'text-zinc-600 group-hover:text-zinc-400'}`}>
+                      {isRecording ? 'Listening...' : isMuted ? 'Mic Muted' : 'Push to Talk'}
                     </span>
                   </div>
                   {isRecording && (

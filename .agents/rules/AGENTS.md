@@ -113,7 +113,12 @@ bun run test
 - **Context**: Context items are stored as JSON in `meeting.context_items` and injected into both copilot and summarizer prompts.
 - **Models**: Add/remove available models in `backend/models_config.json` — no code changes needed.
 - **Meeting Lifecycle**: `is_active=False` at creation → set `True` by `/start` → `False` by `/summarize` → can be re-`True` by `/reactivate`.
-- **Pause**: Frontend pause now explicitly stops background recorder loop and resumes safely without duplicate recorders.
+- **Mic controls**: Frontend microphone toggle is now an explicit mute/unmute control. Mute state persists per meeting in `localStorage` (`meeting:<id>:mic-muted`) and fully releases microphone tracks when muted.
+- **Recorder status UI**: Meeting and chat headers reflect real capture state (`Listening`, `Muted`, `Mic blocked`, `Idle`) instead of only relying on `meeting.is_active`.
+- **Chat persistence**: Right sidebar chat messages are persisted per meeting in browser `localStorage` (`meeting:<id>:chat-messages`) and restored when returning to a meeting page.
+- **Chat links**: Markdown links in chat bubbles are styled for visibility and open in a new tab (`target="_blank"` + `rel="noopener noreferrer"`).
+- **Floating recorder controls**: On meeting page, mic toggle + `Finish & Summarize` are rendered as a floating control bar above the transcript near the bottom center.
+- **Leave-tab behavior**: When the meeting tab becomes hidden, UI auto-mutes and releases mic capture (prevents stale "live" impression on return).
 - **Setup draft strategy**: `/meetings/new` now creates draft meetings lazily (on first meaningful action), preventing orphan rows on page open/close.
 - **Plan versions**: each summarize/regenerate run is persisted in `summary_versions`; UI can switch active version and export markdown.
 - **Agno Usage**: Always check the session ID (`id` from URL) to maintain conversation context with the Agno Co-Pilot.
