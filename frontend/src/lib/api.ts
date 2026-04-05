@@ -40,6 +40,7 @@ export type MeetingDetail = MeetingListItem & {
 
 export type ChatResponse = {
   response: string;
+  tool_calls?: any[];
   transcription_ok?: boolean;
   transcription_error?: string | null;
 };

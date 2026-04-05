@@ -41,7 +41,7 @@ type MeetingData = {
   copilot_model_id: string | null;
   summarizer_model_id: string | null;
 };
-type ChatMessage = { role: 'user' | 'assistant'; text: string };
+type ChatMessage = { role: 'user' | 'assistant'; text: string; tool_calls?: any[] };
 
 export default function MeetingSession({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -339,7 +339,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
         try {
           const response = await sendChatAudio(id, audioBlob, finalMimeType);
           if (response.response) {
-            setMessages((prev) => [...prev, { role: 'assistant', text: response.response }]);
+            setMessages((prev) => [...prev, { role: 'assistant', text: response.response, tool_calls: response.tool_calls }]);
           }
           if (response.transcription_error) {
             console.warn('PTT transcription warning:', response.transcription_error);
@@ -403,7 +403,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
     setIsProcessing(true);
     try {
       const response = await sendChatText(id, msg);
-      setMessages(prev => [...prev, { role: 'assistant', text: response.response }]);
+      setMessages(prev => [...prev, { role: 'assistant', text: response.response, tool_calls: response.tool_calls }]);
       fetchMeeting();
     } catch (err) {
       console.error('Text chat error:', err);
@@ -959,6 +959,16 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
                     className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
                     <div className={`max-w-[90%] p-4 rounded-2xl ${m.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none shadow-lg shadow-blue-600/10' : 'bg-white/5 border border-white/5 rounded-tl-none text-zinc-200'}`}>
+                      {m.tool_calls && m.tool_calls.length > 0 && (
+                        <div className="mb-4 space-y-1.5">
+                          {m.tool_calls.filter(tc => tc.type === 'call').map((tc, tcIdx) => (
+                            <div key={tcIdx} className="flex items-center gap-2 text-[10px] font-black text-blue-400/80 uppercase tracking-[0.1em] bg-blue-500/5 py-1.5 px-2.5 rounded-lg border border-blue-500/10 w-fit">
+                              <Search size={10} className="text-blue-500" />
+                              <span>{tc.tool_name === 'web_search' ? 'Searching' : tc.tool_name}: {tc.tool_args?.query || tc.tool_args?.keywords || JSON.stringify(tc.tool_args)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="prose prose-sm prose-invert max-w-none">
                         <ReactMarkdown>{m.text}</ReactMarkdown>
                       </div>

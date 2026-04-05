@@ -60,6 +60,7 @@ class ChatTextRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    tool_calls: Optional[list[dict]] = None
     transcription_ok: Optional[bool] = None
     transcription_error: Optional[str] = None
 
@@ -528,6 +529,40 @@ def get_models():
 # Chat endpoints
 # ---------------------------------------------------------------------------
 
+def _extract_tool_events(messages: list) -> list[dict]:
+    """Extract tool calls and results from agent messages."""
+    events = []
+    if not messages:
+        return events
+    for msg in messages:
+        # Check if msg is an object with attributes or a dict
+        role = getattr(msg, 'role', None) or (msg.get('role') if isinstance(msg, dict) else None)
+        if role == 'assistant':
+            tool_calls = getattr(msg, 'tool_calls', None) or (msg.get('tool_calls') if isinstance(msg, dict) else None)
+            if tool_calls:
+                for tc in tool_calls:
+                    # Agno tool calls are often dicts
+                    func = tc.get('function', {})
+                    args = func.get('arguments')
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            pass
+                    events.append({
+                        "type": "call",
+                        "tool_name": func.get('name'),
+                        "tool_args": args
+                    })
+        elif role == 'tool':
+            events.append({
+                "type": "result",
+                "tool_name": getattr(msg, 'tool_name', None) or (msg.get('tool_name') if isinstance(msg, dict) else None),
+                "content": getattr(msg, 'content', None) or (msg.get('content') if isinstance(msg, dict) else None)
+            })
+    return events
+
+
 @app.post("/api/chat/text", response_model=ChatResponse)
 def chat_text(req: ChatTextRequest, db: Session = Depends(get_db)):
     meeting = db.query(Meeting).filter(Meeting.id == req.session_id).first()
@@ -546,11 +581,22 @@ def chat_text(req: ChatTextRequest, db: Session = Depends(get_db)):
     )
     response = agent.run(req.message)
     content = response.content if hasattr(response, 'content') else str(response)
+    tool_calls = _extract_tool_events(response.messages)
+
+    # Log tool calls in transcript
+    for tc in tool_calls:
+        if tc.get("type") == "call":
+            tool_name = tc.get("tool_name")
+            args = tc.get("tool_args")
+            search_term = ""
+            if isinstance(args, dict):
+                search_term = args.get("query") or args.get("keywords") or str(args)
+            meeting.transcript += f"\n*Copilot action ({tool_name}): {search_term}*\n"
 
     meeting.transcript += f"\n**Copilot Response:**\n\n{content}\n\n---"
     db.commit()
 
-    return {"response": content}
+    return {"response": content, "tool_calls": tool_calls}
 
 
 @app.post("/api/chat/audio", response_model=ChatResponse)
@@ -591,11 +637,22 @@ def chat_audio(
     )
     response = agent.run(text)
     content = response.content if hasattr(response, "content") else str(response)
+    tool_calls = _extract_tool_events(response.messages)
+
+    # Log tool calls in transcript
+    for tc in tool_calls:
+        if tc.get("type") == "call":
+            tool_name = tc.get("tool_name")
+            args = tc.get("tool_args")
+            search_term = ""
+            if isinstance(args, dict):
+                search_term = args.get("query") or args.get("keywords") or str(args)
+            meeting.transcript += f"\n*Copilot action ({tool_name}): {search_term}*\n"
 
     meeting.transcript += f"\n**Copilot Response:**\n\n{content}\n\n---"
     db.commit()
 
-    return {"response": content, "transcription_ok": True, "transcription_error": None}
+    return {"response": content, "tool_calls": tool_calls, "transcription_ok": True, "transcription_error": None}
 
 
 @app.post("/api/meeting/transcript", response_model=ChatResponse)
