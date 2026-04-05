@@ -8,10 +8,13 @@ from agno.models.openrouter import OpenRouter
 from models import COPILOT_MODEL
 from prompts import COPILOT_SYSTEM_PROMPT
 
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AGENTS_DB_PATH = os.path.join(BACKEND_DIR, "agents.db")
+
 # Keep agent storage separate from our metadata db
 agent_db = SqliteDb(
     session_table="copilot_sessions",
-    db_file="agents.db"
+    db_file=AGENTS_DB_PATH,
 )
 
 

@@ -3,14 +3,15 @@ import io
 import uuid
 import json
 import tempfile
-from typing import List, Optional
+from typing import Optional, TypedDict
 from pydantic import BaseModel
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from openai import OpenAI
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Search for .env from backend up to root
 load_dotenv(".env")
@@ -18,8 +19,8 @@ if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPEN_AI_SECRET_K
     load_dotenv("../.env")
 
 
-from database import Meeting, get_db
-from agents.copilot import get_copilot_agent, agent_db
+from database import Meeting, SummaryVersion, get_db
+from agents.copilot import AGENTS_DB_PATH, get_copilot_agent
 from agents.summarizer import run_summarizer
 
 app = FastAPI(title="Meeting Co-Pilot API")
@@ -59,9 +60,15 @@ class ChatTextRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    transcription_ok: Optional[bool] = None
+    transcription_error: Optional[str] = None
 
 class SummarizeResponse(BaseModel):
     summary_markdown: str
+
+
+class RegenerateSummaryRequest(BaseModel):
+    instruction: Optional[str] = None
 
 class ContextTextRequest(BaseModel):
     text: str
@@ -122,23 +129,203 @@ def _extract_text_from_file(content: bytes, filename: str) -> str:
     return content.decode("utf-8", errors="replace")
 
 
-def _transcribe_audio(file_bytes: bytes, suffix: str = ".webm") -> str:
-    """Write bytes to a temp file, transcribe with Whisper, return text."""
+_AUDIO_SUFFIX_BY_MIME = {
+    "audio/webm": ".webm",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".mp4",
+    "audio/ogg": ".ogg",
+}
+_ALLOWED_AUDIO_SUFFIXES = {".webm", ".wav", ".mp3", ".m4a", ".mp4", ".ogg"}
+
+
+class TranscriptionResult(TypedDict):
+    ok: bool
+    text: str
+    error: Optional[str]
+
+
+def _resolve_audio_suffix(
+    filename: Optional[str],
+    mime_type: Optional[str] = None,
+    file_ext: Optional[str] = None,
+) -> str:
+    if file_ext:
+        normalized = file_ext.strip().lower()
+        if normalized and not normalized.startswith("."):
+            normalized = f".{normalized}"
+        if normalized in _ALLOWED_AUDIO_SUFFIXES:
+            return normalized
+
+    if mime_type:
+        normalized_mime = mime_type.strip().lower().split(";")[0]
+        mapped = _AUDIO_SUFFIX_BY_MIME.get(normalized_mime)
+        if mapped:
+            return mapped
+
+    if filename:
+        suffix = os.path.splitext(filename)[1].lower()
+        if suffix in _ALLOWED_AUDIO_SUFFIXES:
+            return suffix
+
+    return ".webm"
+
+
+def _validate_audio_mime(mime_type: Optional[str]) -> Optional[str]:
+    if not mime_type:
+        return None
+    normalized = mime_type.strip().lower()
+    if not normalized.startswith("audio/"):
+        return "Uploaded file must be an audio content type."
+    return None
+
+
+def _transcribe_audio(file_bytes: bytes, suffix: str = ".webm") -> TranscriptionResult:
+    """Write bytes to a temp file, transcribe with Whisper, and return structured result."""
+    if len(file_bytes) < 512:
+        return {"ok": False, "text": "", "error": "Audio chunk too short to transcribe."}
+
+    if suffix not in _ALLOWED_AUDIO_SUFFIXES:
+        suffix = ".webm"
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
+
+    filename = f"audio{suffix}"
     try:
         with open(tmp_path, "rb") as audio_file:
             transcription = openai_client.audio.transcriptions.create(
                 model="whisper-1",
-                file=("audio.webm", audio_file)
+                file=(filename, audio_file),
             )
-        return transcription.text
+        text = (transcription.text or "").strip()
+        if not text:
+            return {"ok": False, "text": "", "error": "Transcription returned empty text."}
+        return {"ok": True, "text": text, "error": None}
     except Exception as e:
-        print(f"Transcription error: {e}")
-        return ""
+        print(f"Transcription error ({suffix}): {e}")
+        return {"ok": False, "text": "", "error": str(e)}
     finally:
         os.unlink(tmp_path)
+
+
+def _safe_json_loads(value):
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _normalize_runs_payload(raw_runs) -> list[dict]:
+    payload = raw_runs
+
+    # Some rows store JSON list directly, some store a double-encoded JSON string.
+    for _ in range(2):
+        if isinstance(payload, str):
+            payload = _safe_json_loads(payload)
+        else:
+            break
+
+    if isinstance(payload, dict):
+        payload = payload.get("runs", [])
+
+    if not isinstance(payload, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in payload:
+        candidate = item
+        if isinstance(candidate, str):
+            candidate = _safe_json_loads(candidate)
+        if isinstance(candidate, dict):
+            normalized.append(candidate)
+
+    return normalized
+
+
+def _extract_user_text_from_run(run: dict) -> str:
+    user_input = run.get("input")
+    if isinstance(user_input, dict):
+        for key in ("input_content", "message", "query", "prompt", "text"):
+            value = user_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    elif isinstance(user_input, str) and user_input.strip():
+        return user_input.strip()
+
+    for key in ("user_message", "query", "prompt", "message"):
+        value = run.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return ""
+
+
+def _extract_chat_history_from_runs(raw_runs, max_runs: int = 60) -> str:
+    runs = _normalize_runs_payload(raw_runs)
+    if not runs:
+        return ""
+
+    sliced_runs = runs[-max_runs:]
+    lines: list[str] = []
+
+    for run in sliced_runs:
+        user_text = _extract_user_text_from_run(run)
+        assistant_text = run.get("content", "")
+
+        if isinstance(user_text, str) and user_text.strip():
+            lines.append(f"**User**: {user_text.strip()}")
+
+        if isinstance(assistant_text, str) and assistant_text.strip():
+            lines.append(f"**Copilot**: {assistant_text.strip()}")
+
+    return "\n\n".join(lines)
+
+
+def _build_chat_history_for_session(session_id: str) -> str:
+    try:
+        import sqlite3 as _sqlite3
+
+        with _sqlite3.connect(AGENTS_DB_PATH) as _conn:
+            _cur = _conn.cursor()
+            _cur.execute("SELECT runs FROM copilot_sessions WHERE session_id = ?", (session_id,))
+            _row = _cur.fetchone()
+
+        raw_runs = _row[0] if _row and _row[0] else None
+        return _extract_chat_history_from_runs(raw_runs)
+    except Exception as e:
+        print(f"Could not fetch copilot history: {e}")
+        return ""
+
+
+def _save_summary_version(
+    db: Session,
+    meeting: Meeting,
+    summary_markdown: str,
+    instruction: Optional[str] = None,
+) -> SummaryVersion:
+    max_version = (
+        db.query(func.max(SummaryVersion.version_number))
+        .filter(SummaryVersion.meeting_id == meeting.id)
+        .scalar()
+    )
+    next_version = int(max_version or 0) + 1
+
+    version = SummaryVersion(
+        meeting_id=meeting.id,
+        version_number=next_version,
+        content=summary_markdown,
+        instruction=instruction.strip() if instruction and instruction.strip() else None,
+    )
+
+    db.add(version)
+    meeting.summary_markdown = summary_markdown
+    db.commit()
+    db.refresh(version)
+    return version
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +386,43 @@ def delete_meeting(session_id: str, db: Session = Depends(get_db)):
     db.delete(meeting)
     db.commit()
     return {"ok": True}
+
+
+@app.post("/api/meeting/cleanup-stale-drafts")
+def cleanup_stale_drafts(
+    max_age_minutes: int = Query(120, ge=1, le=60 * 24 * 30),
+    db: Session = Depends(get_db),
+):
+    """Delete old inactive empty meetings created by abandoned setup flows."""
+    cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+    drafts = (
+        db.query(Meeting)
+        .filter(Meeting.is_active == False)
+        .filter(Meeting.created_at < cutoff)
+        .all()
+    )
+
+    deleted = 0
+    for draft in drafts:
+        transcript = (draft.transcript or "").strip()
+        summary = (draft.summary_markdown or "").strip()
+
+        try:
+            context_items = json.loads(draft.context_items or "[]")
+            has_context = bool(context_items)
+        except Exception:
+            has_context = bool((draft.context_items or "").strip())
+
+        if transcript or summary or has_context:
+            continue
+
+        db.delete(draft)
+        deleted += 1
+
+    if deleted:
+        db.commit()
+
+    return {"deleted": deleted, "max_age_minutes": max_age_minutes}
 
 
 @app.post("/api/meetings/{session_id}/reactivate")
@@ -330,15 +554,31 @@ def chat_text(req: ChatTextRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/api/chat/audio", response_model=ChatResponse)
-def chat_audio(session_id: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+def chat_audio(
+    session_id: str = Form(...),
+    file: UploadFile = File(...),
+    mime_type: Optional[str] = Form(None),
+    file_ext: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
     meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    text = _transcribe_audio(file.file.read())
-    if not text:
-        return {"response": ""}
+    mime_error = _validate_audio_mime(mime_type) or _validate_audio_mime(file.content_type)
+    if mime_error:
+        raise HTTPException(status_code=400, detail=mime_error)
 
+    suffix = _resolve_audio_suffix(file.filename, mime_type=mime_type or file.content_type, file_ext=file_ext)
+    result = _transcribe_audio(file.file.read(), suffix=suffix)
+    if not result["ok"]:
+        return {
+            "response": "",
+            "transcription_ok": False,
+            "transcription_error": result["error"],
+        }
+
+    text = result["text"]
     ts = datetime.now().strftime("%H:%M:%S")
     meeting.transcript += f"\n\n**[{ts}] User Query:** {text}\n"
 
@@ -347,32 +587,45 @@ def chat_audio(session_id: str = Form(...), file: UploadFile = File(...), db: Se
         session_id,
         transcript=meeting.transcript,
         context_text=context_text,
-        model_id=meeting.copilot_model_id
+        model_id=meeting.copilot_model_id,
     )
     response = agent.run(text)
-    content = response.content if hasattr(response, 'content') else str(response)
+    content = response.content if hasattr(response, "content") else str(response)
 
     meeting.transcript += f"\n**Copilot Response:**\n\n{content}\n\n---"
     db.commit()
 
-    return {"response": content}
+    return {"response": content, "transcription_ok": True, "transcription_error": None}
 
 
 @app.post("/api/meeting/transcript", response_model=ChatResponse)
-def meeting_transcript(session_id: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+def meeting_transcript(
+    session_id: str = Form(...),
+    file: UploadFile = File(...),
+    mime_type: Optional[str] = Form(None),
+    file_ext: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
     meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     if not meeting.is_active:
-        return {"response": ""}
+        return {"response": "", "transcription_ok": False, "transcription_error": "Meeting is not active."}
 
-    text = _transcribe_audio(file.file.read())
-    if text:
+    mime_error = _validate_audio_mime(mime_type) or _validate_audio_mime(file.content_type)
+    if mime_error:
+        raise HTTPException(status_code=400, detail=mime_error)
+
+    suffix = _resolve_audio_suffix(file.filename, mime_type=mime_type or file.content_type, file_ext=file_ext)
+    result = _transcribe_audio(file.file.read(), suffix=suffix)
+    if result["ok"]:
+        text = result["text"]
         ts = datetime.now().strftime("%H:%M:%S")
         meeting.transcript += f"\n\n**[{ts}]** {text}"
         db.commit()
+        return {"response": text, "transcription_ok": True, "transcription_error": None}
 
-    return {"response": text}
+    return {"response": "", "transcription_ok": False, "transcription_error": result["error"]}
 
 
 # ---------------------------------------------------------------------------
@@ -392,25 +645,7 @@ def summarize_meeting(session_id: str, db: Session = Depends(get_db)):
     transcript = meeting.transcript
     context_text = _get_context_text(meeting)
 
-    # Fetch copilot conversation history from agents.db
-    chat_history = ""
-    try:
-        import sqlite3 as _sqlite3
-        import json as _json
-        with _sqlite3.connect("agents.db") as _conn:
-            _cur = _conn.cursor()
-            _cur.execute("SELECT runs FROM copilot_sessions WHERE session_id = ?", (session_id,))
-            _row = _cur.fetchone()
-        if _row and _row[0]:
-            _runs = _json.loads(_row[0])
-            _lines = []
-            for _run in _runs:
-                _content = _run.get("content", "")
-                if _content:
-                    _lines.append(f"**Copilot**: {_content}")
-            chat_history = "\n\n".join(_lines)
-    except Exception as e:
-        print(f"Could not fetch copilot history: {e}")
+    chat_history = _build_chat_history_for_session(session_id)
 
     if len(transcript.strip()) < 10 and not chat_history:
         summary = "No meaningful discussion occurred in this meeting."
@@ -422,10 +657,87 @@ def summarize_meeting(session_id: str, db: Session = Depends(get_db)):
             model_id=meeting.summarizer_model_id
         )
 
-    meeting.summary_markdown = summary
-    db.commit()
+    _save_summary_version(db, meeting, summary)
 
     return {"summary_markdown": summary}
+
+
+@app.post("/api/meeting/{session_id}/summaries/regenerate", response_model=SummarizeResponse)
+def regenerate_summary(
+    session_id: str,
+    req: RegenerateSummaryRequest,
+    db: Session = Depends(get_db),
+):
+    meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    transcript = meeting.transcript
+    context_text = _get_context_text(meeting)
+    chat_history = _build_chat_history_for_session(session_id)
+
+    if len(transcript.strip()) < 10 and not chat_history:
+        summary = "No meaningful discussion occurred in this meeting."
+    else:
+        summary = run_summarizer(
+            transcript=transcript,
+            chat_history=chat_history,
+            context_text=context_text,
+            model_id=meeting.summarizer_model_id,
+            instruction=req.instruction,
+        )
+
+    _save_summary_version(db, meeting, summary, instruction=req.instruction)
+    return {"summary_markdown": summary}
+
+
+@app.get("/api/meetings/{session_id}/summaries")
+def get_summary_versions(session_id: str, db: Session = Depends(get_db)):
+    meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    versions = (
+        db.query(SummaryVersion)
+        .filter(SummaryVersion.meeting_id == session_id)
+        .order_by(SummaryVersion.version_number.desc())
+        .all()
+    )
+
+    active_content = (meeting.summary_markdown or "").strip()
+
+    return {
+        "versions": [
+            {
+                "version": v.version_number,
+                "created_at": v.created_at,
+                "instruction": v.instruction,
+                "content": v.content,
+                "is_active": bool(active_content and v.content.strip() == active_content),
+            }
+            for v in versions
+        ]
+    }
+
+
+@app.post("/api/meetings/{session_id}/summaries/{version_number}/activate")
+def activate_summary_version(session_id: str, version_number: int, db: Session = Depends(get_db)):
+    meeting = db.query(Meeting).filter(Meeting.id == session_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    version = (
+        db.query(SummaryVersion)
+        .filter(SummaryVersion.meeting_id == session_id)
+        .filter(SummaryVersion.version_number == version_number)
+        .first()
+    )
+    if not version:
+        raise HTTPException(status_code=404, detail="Summary version not found")
+
+    meeting.summary_markdown = version.content
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

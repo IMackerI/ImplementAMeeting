@@ -2,24 +2,25 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { createMeeting, startMeeting, getModels, addContextFile, addContextText, deleteContextItem } from '@/lib/api';
+import {
+  addContextFile,
+  addContextText,
+  cleanupStaleDrafts,
+  createMeeting,
+  deleteContextItem,
+  getModels,
+  startMeeting,
+  updateMeeting,
+  type ContextItem,
+  type ModelOption,
+} from '@/lib/api';
+import { removeContextItemAtIndex } from '@/lib/meetingSessionState';
 import {
   ArrowLeft, Plus, Upload, FileText, X, ChevronDown,
   Play, Mic, Sparkles, Loader2, File as FileIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-interface ModelOption {
-  id: string;
-  provider: string;
-  display_name: string;
-}
-
-interface ContextItem {
-  type: 'text' | 'file';
-  name: string;
-  content: string;
-}
 
 export default function NewMeetingPage() {
   const router = useRouter();
@@ -35,26 +36,30 @@ export default function NewMeetingPage() {
   const [showTextNote, setShowTextNote] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);  // created after first load
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Create the meeting stub as soon as the page mounts
+  // Load model options only; create draft meeting lazily on first meaningful action.
   useEffect(() => {
     const init = async () => {
       try {
         setModelsLoading(true);
-        const [modelsData, { session_id }] = await Promise.all([
-          getModels(),
-          createMeeting({ title: 'New Meeting' }),
-        ]);
+        setErrorMessage(null);
+        const modelsData = await getModels();
+
         setCopilotModels(modelsData.copilot_models);
         setSummarizerModels(modelsData.summarizer_models);
+
         if (modelsData.copilot_models.length) setSelectedCopilot(modelsData.copilot_models[0].id);
         if (modelsData.summarizer_models.length) setSelectedSummarizer(modelsData.summarizer_models[0].id);
-        setSessionId(session_id);
+
+        // Best-effort cleanup for stale abandoned drafts from previous sessions.
+        cleanupStaleDrafts(180).catch(() => undefined);
       } catch (e) {
         console.error('Setup init failed:', e);
+        setErrorMessage('Failed to load available models. Please refresh the page.');
       } finally {
         setModelsLoading(false);
       }
@@ -62,56 +67,90 @@ export default function NewMeetingPage() {
     init();
   }, []);
 
+  const ensureDraftMeeting = async () => {
+    if (sessionId) return sessionId;
+
+    const draftTitle = title.trim() || 'New Meeting';
+    const { session_id } = await createMeeting({
+      title: draftTitle,
+      copilot_model_id: selectedCopilot || undefined,
+      summarizer_model_id: selectedSummarizer || undefined,
+    });
+
+    setSessionId(session_id);
+    return session_id;
+  };
+
   const handleFileUpload = async (files: FileList | null) => {
-    if (!files || !sessionId) return;
-    for (const file of Array.from(files)) {
-      try {
-        const { items } = await addContextFile(sessionId, file);
+    if (!files) return;
+
+    try {
+      setErrorMessage(null);
+      const draftSessionId = await ensureDraftMeeting();
+
+      for (const file of Array.from(files)) {
+        const { items } = await addContextFile(draftSessionId, file);
         setContextItems(items);
-      } catch (e) {
-        console.error('File upload error:', e);
       }
+    } catch (e) {
+      console.error('File upload error:', e);
+      setErrorMessage('Failed to upload context file. Please try again.');
     }
   };
 
   const handleAddTextNote = async () => {
-    if (!textNote.trim() || !sessionId) return;
+    if (!textNote.trim()) return;
+
     try {
-      const { items } = await addContextText(sessionId, textNote, textNoteName || 'Text note');
+      setErrorMessage(null);
+      const draftSessionId = await ensureDraftMeeting();
+      const { items } = await addContextText(draftSessionId, textNote, textNoteName || 'Text note');
       setContextItems(items);
       setTextNote('');
       setTextNoteName('');
       setShowTextNote(false);
     } catch (e) {
       console.error('Text note error:', e);
+      setErrorMessage('Failed to save text note. Please try again.');
     }
   };
 
   const handleDeleteContextItem = async (index: number) => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      setContextItems((prev) => removeContextItemAtIndex(prev, index));
+      return;
+    }
+
     try {
+      setErrorMessage(null);
       const { items } = await deleteContextItem(sessionId, index);
       setContextItems(items);
     } catch (e) {
       console.error('Delete context error:', e);
+      setErrorMessage('Failed to delete context item.');
     }
   };
 
   const handleStartMeeting = async () => {
-    if (!sessionId || isStarting) return;
+    if (isStarting) return;
+
     setIsStarting(true);
+    setErrorMessage(null);
+
     try {
-      // Update models if changed from defaults
-      const { updateMeeting } = await import('@/lib/api');
-      await updateMeeting(sessionId, {
-        title: title.trim() || `Meeting ${sessionId.slice(0, 8)}`,
-        copilot_model_id: selectedCopilot,
-        summarizer_model_id: selectedSummarizer,
+      const draftSessionId = await ensureDraftMeeting();
+
+      await updateMeeting(draftSessionId, {
+        title: title.trim() || `Meeting ${draftSessionId.slice(0, 8)}`,
+        copilot_model_id: selectedCopilot || undefined,
+        summarizer_model_id: selectedSummarizer || undefined,
       });
-      await startMeeting(sessionId);
-      router.push(`/meetings/${sessionId}`);
+
+      await startMeeting(draftSessionId);
+      router.push(`/meetings/${draftSessionId}`);
     } catch (e) {
       console.error('Start meeting error:', e);
+      setErrorMessage('Failed to start the meeting. Please retry.');
       setIsStarting(false);
     }
   };
@@ -153,7 +192,7 @@ export default function NewMeetingPage() {
             type="text"
             value={title}
             onChange={e => setTitle(e.target.value)}
-            placeholder={`Meeting ${sessionId?.slice(0, 8) ?? '...'}`}
+            placeholder={sessionId ? `Meeting ${sessionId.slice(0, 8)}` : 'Planning meeting title'}
             className="w-full bg-zinc-900 border border-white/10 rounded-2xl px-5 py-4 text-lg font-medium outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/40 transition-all placeholder:text-zinc-700"
           />
         </section>
@@ -304,10 +343,15 @@ export default function NewMeetingPage() {
         </section>
 
         {/* Start Button */}
-        <div className="pt-4">
+        <div className="pt-4 space-y-3">
+          {errorMessage && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {errorMessage}
+            </div>
+          )}
           <button
             onClick={handleStartMeeting}
-            disabled={isStarting || !sessionId}
+            disabled={isStarting || modelsLoading}
             className="w-full h-16 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-2xl flex items-center justify-center gap-3 font-black text-lg tracking-tight transition-all hover:shadow-2xl hover:shadow-blue-600/30 group"
           >
             {isStarting ? (

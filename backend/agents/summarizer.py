@@ -30,7 +30,13 @@ def _build_summarizer_model(model_id: str | None):
         return OpenRouter(id=model_id, api_key=openrouter_key, max_tokens=8192)
 
 
-def run_summarizer(transcript: str, chat_history: str, context_text: str = "", model_id: str | None = None) -> str:
+def run_summarizer(
+    transcript: str,
+    chat_history: str,
+    context_text: str = "",
+    model_id: str | None = None,
+    instruction: str | None = None,
+) -> str:
     agent = Agent(
         model=_build_summarizer_model(model_id),
         instructions=[SUMMARIZER_SYSTEM_PROMPT],
@@ -41,10 +47,18 @@ def run_summarizer(transcript: str, chat_history: str, context_text: str = "", m
     if context_text.strip():
         context_block = f"\n\nContext materials provided before the meeting:\n<meeting_context>\n{context_text}\n</meeting_context>\n"
 
+    instruction_block = ""
+    if instruction and instruction.strip():
+        instruction_block = (
+            "\n\nAdditional user instruction for this version:"
+            f"\n<regeneration_instruction>\n{instruction.strip()}\n</regeneration_instruction>"
+        )
+
     prompt = (
         f"Here is the meeting transcript:\n\n{transcript}"
         f"{context_block}"
         f"\n\nHere is the chat history during the meeting:\n\n{chat_history}"
+        f"{instruction_block}"
     )
     
     response = agent.run(prompt)

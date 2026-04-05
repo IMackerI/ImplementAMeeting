@@ -2,35 +2,62 @@
 
 import React, { useEffect, useState, useRef, use, useCallback } from 'react';
 import {
-  getMeeting, sendChatText, sendChatAudio, sendBackgroundTranscript,
-  summarizeMeeting, updateMeeting, addContextFile, addContextText,
-  deleteContextItem, reactivateMeeting
+  activateSummaryVersion,
+  addContextFile,
+  addContextText,
+  deleteContextItem,
+  getMeeting,
+  getSummaryVersions,
+  reactivateMeeting,
+  regenerateSummary,
+  sendBackgroundTranscript,
+  sendChatAudio,
+  sendChatText,
+  summarizeMeeting,
+  type SummaryVersion,
+  updateMeeting,
 } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import {
   Mic, Send,
   FileText, Activity, Search, CheckCircle2,
   Home, ChevronRight, X, Pause, Play,
-  Upload, Plus, File as FileIcon, Trash2, PanelRightOpen,
-  RotateCcw, Pencil, Check
+  Upload, Plus, File as FileIcon, PanelRightOpen,
+  RotateCcw, Pencil, Check, Copy, Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
+import { nextViewedSummary, shouldAutoSwitchToSummary } from '@/lib/meetingSessionState';
 
 type ContextItem = { type: 'text' | 'file'; name: string; content: string };
+type MeetingData = {
+  id: string;
+  title: string;
+  created_at: string;
+  is_active: boolean;
+  summary_markdown: string | null;
+  transcript: string;
+  context_items: ContextItem[];
+  copilot_model_id: string | null;
+  summarizer_model_id: string | null;
+};
+type ChatMessage = { role: 'user' | 'assistant'; text: string };
 
 export default function MeetingSession({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
 
-  const [meeting, setMeeting] = useState<any>(null);
-  const [messages, setMessages] = useState<any[]>([]);
+  const [meeting, setMeeting] = useState<MeetingData | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [viewedSummary, setViewedSummary] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [copiedSummary, setCopiedSummary] = useState(false);
 
   // Inline rename
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -50,8 +77,13 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   const audioChunksRef = useRef<Blob[]>([]);
 
   const backgroundRecorderRef = useRef<MediaRecorder | null>(null);
-  const bgTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const bgNextChunkTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bgStopChunkTimerRef = useRef<NodeJS.Timeout | null>(null);
   const bgStreamRef = useRef<MediaStream | null>(null);
+  const bgLoopActiveRef = useRef(false);
+  const bgUploadInFlightRef = useRef(false);
+  const isPttActiveRef = useRef(false);
+
   const isMeetingActiveRef = useRef(true);
   const isPausedRef = useRef(false);
   const suppressBgChunkRef = useRef(false);
@@ -64,6 +96,15 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   // ---------------------------------------------------------------------------
   // Data fetching
   // ---------------------------------------------------------------------------
+  const fetchSummaryHistory = useCallback(async () => {
+    try {
+      const { versions } = await getSummaryVersions(id);
+      setSummaryVersions(versions);
+    } catch (error) {
+      console.error('Error fetching summary versions:', error);
+    }
+  }, [id]);
+
   const fetchMeeting = useCallback(async () => {
     try {
       const data = await getMeeting(id);
@@ -76,13 +117,262 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
         pollIntervalRef.current = null;
       }
 
-      if (data.summary_markdown && !viewedSummary && !userChoseTranscriptRef.current) {
+      if (
+        shouldAutoSwitchToSummary({
+          hasSummary: Boolean(data.summary_markdown),
+          viewedSummary,
+          userChoseTranscript: userChoseTranscriptRef.current,
+        })
+      ) {
         setViewedSummary(true);
+      }
+
+      if (data.summary_markdown) {
+        fetchSummaryHistory();
+      } else {
+        setSummaryVersions([]);
       }
     } catch (error) {
       console.error('Error fetching meeting:', error);
     }
-  }, [id, viewedSummary]);
+  }, [fetchSummaryHistory, id, viewedSummary]);
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  useEffect(() => { transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [meeting?.transcript]);
+  useEffect(() => { if (isEditingTitle && titleInputRef.current) titleInputRef.current.focus(); }, [isEditingTitle]);
+
+  // ---------------------------------------------------------------------------
+  // Recording helpers (background + PTT)
+  // ---------------------------------------------------------------------------
+  const pickRecorderMimeType = useCallback(() => {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus',
+      'audio/ogg',
+    ];
+    return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+  }, []);
+
+  const clearBackgroundTimers = useCallback(() => {
+    if (bgNextChunkTimerRef.current) {
+      clearTimeout(bgNextChunkTimerRef.current);
+      bgNextChunkTimerRef.current = null;
+    }
+    if (bgStopChunkTimerRef.current) {
+      clearTimeout(bgStopChunkTimerRef.current);
+      bgStopChunkTimerRef.current = null;
+    }
+  }, []);
+
+  const releaseBackgroundStream = useCallback(() => {
+    bgStreamRef.current?.getTracks().forEach((track) => track.stop());
+    bgStreamRef.current = null;
+  }, []);
+
+  const stopBackgroundLoop = useCallback((discardCurrentChunk = false, releaseStream = false) => {
+    bgLoopActiveRef.current = false;
+    clearBackgroundTimers();
+
+    if (discardCurrentChunk) {
+      suppressBgChunkRef.current = true;
+    }
+
+    const recorder = backgroundRecorderRef.current;
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+    }
+    backgroundRecorderRef.current = null;
+
+    if (releaseStream) {
+      releaseBackgroundStream();
+    }
+  }, [clearBackgroundTimers, releaseBackgroundStream]);
+
+  const startBackgroundRecording = useCallback(async () => {
+    if (!isMeetingActiveRef.current || isPausedRef.current || isPttActiveRef.current || bgLoopActiveRef.current) {
+      return;
+    }
+
+    try {
+      if (!bgStreamRef.current) {
+        bgStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+
+      const stream = bgStreamRef.current;
+      if (!stream) return;
+
+      bgLoopActiveRef.current = true;
+
+      const recordChunk = () => {
+        if (!bgLoopActiveRef.current) return;
+
+        if (!isMeetingActiveRef.current) {
+          stopBackgroundLoop(true, true);
+          return;
+        }
+
+        if (isPausedRef.current || isPttActiveRef.current) {
+          clearBackgroundTimers();
+          bgNextChunkTimerRef.current = setTimeout(recordChunk, 350);
+          return;
+        }
+
+        const preferredMimeType = pickRecorderMimeType();
+        const recorder = preferredMimeType
+          ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+          : new MediaRecorder(stream);
+
+        backgroundRecorderRef.current = recorder;
+        const currentChunks: Blob[] = [];
+
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            currentChunks.push(e.data);
+          }
+        };
+
+        recorder.onstop = async () => {
+          backgroundRecorderRef.current = null;
+
+          const shouldSend = !suppressBgChunkRef.current;
+          suppressBgChunkRef.current = false;
+
+          const finalMimeType = preferredMimeType || recorder.mimeType || 'audio/webm';
+          const blob = new Blob(currentChunks, { type: finalMimeType });
+
+          const shouldUpload =
+            shouldSend &&
+            blob.size > 1024 &&
+            isMeetingActiveRef.current &&
+            !isPausedRef.current &&
+            !isPttActiveRef.current;
+
+          if (shouldUpload && !bgUploadInFlightRef.current) {
+            bgUploadInFlightRef.current = true;
+            try {
+              await sendBackgroundTranscript(id, blob, finalMimeType);
+              await fetchMeeting();
+            } catch (err) {
+              console.error('Background transcription upload error:', err);
+            } finally {
+              bgUploadInFlightRef.current = false;
+            }
+          }
+
+          if (bgLoopActiveRef.current && isMeetingActiveRef.current) {
+            clearBackgroundTimers();
+            bgNextChunkTimerRef.current = setTimeout(recordChunk, 120);
+          }
+        };
+
+        recorder.start();
+        clearBackgroundTimers();
+        bgStopChunkTimerRef.current = setTimeout(() => {
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        }, 20000);
+      };
+
+      recordChunk();
+    } catch (err) {
+      console.error('Failed to start background recording:', err);
+      bgLoopActiveRef.current = false;
+    }
+  }, [clearBackgroundTimers, fetchMeeting, id, pickRecorderMimeType, stopBackgroundLoop]);
+
+  const handlePauseResume = () => {
+    const nowPaused = !isPaused;
+    setIsPaused(nowPaused);
+    isPausedRef.current = nowPaused;
+
+    if (nowPaused) {
+      stopBackgroundLoop(true, false);
+      return;
+    }
+
+    startBackgroundRecording();
+  };
+
+  // ---------------------------------------------------------------------------
+  // PTT recording
+  // ---------------------------------------------------------------------------
+  const startRecording = async () => {
+    if (!meeting?.is_active || isRecording || isProcessing) return;
+
+    try {
+      isPttActiveRef.current = true;
+      stopBackgroundLoop(true, false);
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMimeType = pickRecorderMimeType();
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
+
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        mediaRecorderRef.current = null;
+
+        const finalMimeType = preferredMimeType || recorder.mimeType || 'audio/webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: finalMimeType });
+
+        isPttActiveRef.current = false;
+
+        if (audioBlob.size < 1024) {
+          startBackgroundRecording();
+          return;
+        }
+
+        setIsProcessing(true);
+        try {
+          const response = await sendChatAudio(id, audioBlob, finalMimeType);
+          if (response.response) {
+            setMessages((prev) => [...prev, { role: 'assistant', text: response.response }]);
+          }
+          if (response.transcription_error) {
+            console.warn('PTT transcription warning:', response.transcription_error);
+          }
+          await fetchMeeting();
+        } catch (err) {
+          console.error('Audio transcription error:', err);
+        } finally {
+          setIsProcessing(false);
+          if (isMeetingActiveRef.current && !isPausedRef.current) {
+            startBackgroundRecording();
+          }
+        }
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      isPttActiveRef.current = false;
+      console.error('Failed to start recording:', err);
+      startBackgroundRecording();
+    }
+  };
+
+  const stopRecording = () => {
+    if (!isRecording) return;
+
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+    }
+    setIsRecording(false);
+  };
 
   useEffect(() => {
     fetchMeeting();
@@ -92,153 +382,15 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       isMeetingActiveRef.current = false;
-      if (bgTimeoutRef.current) clearTimeout(bgTimeoutRef.current);
-      backgroundRecorderRef.current?.stop();
-      bgStreamRef.current?.getTracks().forEach(t => t.stop());
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
-  useEffect(() => { transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [meeting?.transcript]);
-  useEffect(() => { if (isEditingTitle && titleInputRef.current) titleInputRef.current.focus(); }, [isEditingTitle]);
-
-  // ---------------------------------------------------------------------------
-  // Background recording
-  // ---------------------------------------------------------------------------
-  const startBackgroundRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      bgStreamRef.current = stream;
-
-      const recordChunk = () => {
-        if (!isMeetingActiveRef.current) {
-          stream.getTracks().forEach(track => track.stop());
-          return;
-        }
-        if (isPausedRef.current) {
-          // Poll until unpaused
-          bgTimeoutRef.current = setTimeout(recordChunk, 500);
-          return;
-        }
-
-        const options = { mimeType: 'audio/webm' };
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = '';
-
-        const recorder = new MediaRecorder(stream, options);
-        backgroundRecorderRef.current = recorder;
-        const currentChunks: Blob[] = [];
-
-        recorder.ondataavailable = (e) => { if (e.data.size > 0) currentChunks.push(e.data); };
-        recorder.onstop = async () => {
-          const shouldSend = !suppressBgChunkRef.current;
-          suppressBgChunkRef.current = false;
-
-          const blob = new Blob(currentChunks, { type: options.mimeType || 'audio/webm' });
-          if (shouldSend && blob.size > 100 && isMeetingActiveRef.current && !isPausedRef.current) {
-            sendBackgroundTranscript(id, blob).then(() => fetchMeeting());
-          }
-          if (isMeetingActiveRef.current) {
-            bgTimeoutRef.current = setTimeout(recordChunk, 100);
-          } else {
-            stream.getTracks().forEach(track => track.stop());
-          }
-        };
-
-        recorder.start();
-        setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, 20000);
-      };
-
-      recordChunk();
-    } catch (err) {
-      console.error('Failed to start background recording:', err);
-    }
-  };
-
-  const handlePauseResume = () => {
-    const nowPaused = !isPaused;
-    setIsPaused(nowPaused);
-    isPausedRef.current = nowPaused;
-
-    if (nowPaused) {
-      // Stop current bg chunk early (will be discarded)
-      suppressBgChunkRef.current = true;
-      if (backgroundRecorderRef.current?.state === 'recording') {
-        backgroundRecorderRef.current.stop();
+      const pttRecorder = mediaRecorderRef.current;
+      if (pttRecorder && pttRecorder.state === 'recording') {
+        pttRecorder.stop();
       }
-      if (bgTimeoutRef.current) { clearTimeout(bgTimeoutRef.current); bgTimeoutRef.current = null; }
-    }
-    // Resuming: recordChunk loop will detect isPausedRef.current = false and continue
-  };
 
-  // ---------------------------------------------------------------------------
-  // PTT recording
-  // ---------------------------------------------------------------------------
-  const startRecording = async () => {
-    if (!meeting?.is_active) return;
-    try {
-      suppressBgChunkRef.current = true;
-      if (bgTimeoutRef.current) { clearTimeout(bgTimeoutRef.current); bgTimeoutRef.current = null; }
-      if (backgroundRecorderRef.current?.state === 'recording') backgroundRecorderRef.current.stop();
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const options = { mimeType: 'audio/webm' };
-      if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = '';
-
-      const recorder = new MediaRecorder(stream, options);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(track => track.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: options.mimeType || 'audio/webm' });
-        setIsProcessing(true);
-        try {
-          const response = await sendChatAudio(id, audioBlob);
-          setMessages(prev => [...prev, { role: 'assistant', text: response.response }]);
-          fetchMeeting();
-        } catch (err) {
-          console.error('Audio transcription error:', err);
-        } finally {
-          setIsProcessing(false);
-        }
-      };
-
-      recorder.start();
-      setIsRecording(true);
-    } catch (err) {
-      console.error('Failed to start recording:', err);
-    }
-  };
-
-  const stopRecording = () => {
-    mediaRecorderRef.current?.stop();
-    setIsRecording(false);
-    if (isMeetingActiveRef.current && bgStreamRef.current) {
-      const stream = bgStreamRef.current;
-      setTimeout(() => {
-        if (!isMeetingActiveRef.current) return;
-        const options = { mimeType: 'audio/webm' };
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = '';
-        const recorder = new MediaRecorder(stream, options);
-        backgroundRecorderRef.current = recorder;
-        const currentChunks: Blob[] = [];
-        recorder.ondataavailable = (e) => { if (e.data.size > 0) currentChunks.push(e.data); };
-        recorder.onstop = async () => {
-          const suppress = suppressBgChunkRef.current;
-          suppressBgChunkRef.current = false;
-          const blob = new Blob(currentChunks, { type: options.mimeType || 'audio/webm' });
-          if (!suppress && blob.size > 100 && isMeetingActiveRef.current) {
-            sendBackgroundTranscript(id, blob).then(() => fetchMeeting());
-          }
-          if (isMeetingActiveRef.current) bgTimeoutRef.current = setTimeout(() => startBackgroundRecording(), 100);
-        };
-        recorder.start();
-        setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, 20000);
-      }, 300);
-    }
-  };
+      stopBackgroundLoop(true, true);
+    };
+  }, [fetchMeeting, id, startBackgroundRecording, stopBackgroundLoop]);
 
   // ---------------------------------------------------------------------------
   // Chat
@@ -282,6 +434,9 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
       setViewedSummary(false);
       userChoseTranscriptRef.current = false;
       isMeetingActiveRef.current = true;
+      isPausedRef.current = false;
+      setIsPaused(false);
+      stopBackgroundLoop(true, false);
       await fetchMeeting();
       // Restart polling and recording
       if (!pollIntervalRef.current) {
@@ -295,12 +450,72 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
     }
   };
 
+  const handleRegenerateSummary = async () => {
+    const instruction = window.prompt('Optional: add guidance for this regenerated plan (scope, detail level, format).') ?? '';
+
+    setIsRegenerating(true);
+    setIsProcessing(true);
+    try {
+      await regenerateSummary(id, instruction.trim() || undefined);
+      await fetchMeeting();
+      await fetchSummaryHistory();
+      setViewedSummary(true);
+      userChoseTranscriptRef.current = false;
+    } catch (err) {
+      console.error('Summary regeneration error:', err);
+    } finally {
+      setIsRegenerating(false);
+      setIsProcessing(false);
+    }
+  };
+
+  const handleActivateSummaryVersion = async (versionNumber: number) => {
+    try {
+      await activateSummaryVersion(id, versionNumber);
+      await fetchMeeting();
+      await fetchSummaryHistory();
+      setViewedSummary(true);
+      userChoseTranscriptRef.current = false;
+    } catch (err) {
+      console.error('Failed to activate summary version:', err);
+    }
+  };
+
+  const handleCopySummary = async () => {
+    const summary = meeting?.summary_markdown;
+    if (!summary) return;
+
+    try {
+      await navigator.clipboard.writeText(summary);
+      setCopiedSummary(true);
+      setTimeout(() => setCopiedSummary(false), 1500);
+    } catch (err) {
+      console.error('Copy summary failed:', err);
+    }
+  };
+
+  const handleDownloadSummary = () => {
+    const summary = meeting?.summary_markdown;
+    if (!summary) return;
+
+    const blob = new Blob([summary], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeTitle = (meeting?.title || 'meeting-summary').replace(/[^a-z0-9-_]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    a.href = url;
+    a.download = `${safeTitle || 'meeting-summary'}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleSaveTitle = async () => {
     const newTitle = editTitle.trim();
     if (newTitle && newTitle !== meeting?.title) {
       try {
         await updateMeeting(id, { title: newTitle });
-        setMeeting((prev: any) => ({ ...prev, title: newTitle }));
+        setMeeting((prev) => (prev ? { ...prev, title: newTitle } : prev));
       } catch (e) {
         console.error('Rename error:', e);
       }
@@ -345,8 +560,14 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
     }
   };
 
-  const handleViewTranscript = () => { userChoseTranscriptRef.current = true; setViewedSummary(false); };
-  const handleViewSummary = () => { userChoseTranscriptRef.current = false; setViewedSummary(true); };
+  const handleViewTranscript = () => {
+    userChoseTranscriptRef.current = true;
+    setViewedSummary(nextViewedSummary('transcript'));
+  };
+  const handleViewSummary = () => {
+    userChoseTranscriptRef.current = false;
+    setViewedSummary(nextViewedSummary('summary'));
+  };
 
   if (!meeting) return (
     <div className="h-screen bg-black flex items-center justify-center text-zinc-500 font-mono tracking-tighter">
@@ -357,6 +578,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
   const modelLabel = meeting.copilot_model_id
     ? meeting.copilot_model_id.split('/').pop() ?? meeting.copilot_model_id
     : 'GPT-4o Mini';
+  const activeSummaryVersion = summaryVersions.find((version) => version.is_active) ?? summaryVersions[0];
 
   return (
     <div className="h-screen flex flex-col bg-black text-zinc-100 overflow-hidden font-sans">
@@ -466,7 +688,7 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               {viewedSummary ? (
                 <>
                   <button
@@ -476,6 +698,54 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
                     <FileText size={14} />
                     View Transcript
                   </button>
+
+                  {meeting.summary_markdown && (
+                    <>
+                      <button
+                        onClick={handleRegenerateSummary}
+                        disabled={isRegenerating || isProcessing}
+                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-zinc-300 border border-white/10 px-3 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all disabled:opacity-50"
+                        title="Generate a new plan version"
+                      >
+                        <RotateCcw size={14} />
+                        Regenerate
+                      </button>
+
+                      <button
+                        onClick={handleCopySummary}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold uppercase tracking-widest border border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
+                        title="Copy markdown"
+                      >
+                        <Copy size={13} />
+                        {copiedSummary ? 'Copied' : 'Copy'}
+                      </button>
+
+                      <button
+                        onClick={handleDownloadSummary}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold uppercase tracking-widest border border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
+                        title="Download markdown"
+                      >
+                        <Download size={13} />
+                        Download
+                      </button>
+
+                      {summaryVersions.length > 0 && (
+                        <select
+                          value={activeSummaryVersion?.version ?? ''}
+                          onChange={(e) => handleActivateSummaryVersion(Number(e.target.value))}
+                          className="bg-zinc-900 border border-white/10 rounded-xl px-3 py-2 text-xs text-zinc-300 font-bold uppercase tracking-widest outline-none focus:ring-2 focus:ring-blue-500/30"
+                          title="Switch summary version"
+                        >
+                          {summaryVersions.map((version) => (
+                            <option key={version.version} value={version.version}>
+                              V{version.version}{version.instruction ? ' • custom' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </>
+                  )}
+
                   {!meeting.is_active && (
                     <button
                       onClick={handleContinueMeeting}
@@ -506,9 +776,17 @@ export default function MeetingSession({ params }: { params: Promise<{ id: strin
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="prose prose-invert prose-blue max-w-4xl mx-auto prose-h1:text-4xl prose-h1:font-black prose-h2:text-2xl prose-h2:mt-12 prose-p:text-zinc-400 prose-p:leading-relaxed prose-p:text-lg prose-li:text-zinc-400"
+                className="max-w-4xl mx-auto space-y-4"
               >
-                <ReactMarkdown>{meeting.summary_markdown}</ReactMarkdown>
+                {activeSummaryVersion && (
+                  <div className="text-xs text-zinc-500 uppercase tracking-widest font-bold">
+                    Viewing version V{activeSummaryVersion.version}
+                    {activeSummaryVersion.instruction ? ' • custom instruction' : ''}
+                  </div>
+                )}
+                <div className="prose prose-invert prose-blue max-w-none prose-h1:text-4xl prose-h1:font-black prose-h2:text-2xl prose-h2:mt-12 prose-p:text-zinc-400 prose-p:leading-relaxed prose-p:text-lg prose-li:text-zinc-400">
+                  <ReactMarkdown>{meeting.summary_markdown}</ReactMarkdown>
+                </div>
               </motion.div>
             ) : (
               <div className="max-w-4xl mx-auto space-y-6">

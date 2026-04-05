@@ -27,10 +27,9 @@ A FastAPI server hosting two specialized Agno Agents:
 - `agents/copilot.py`: Copilot agent — accepts `context_text` and `model_id` overrides.
 - `agents/summarizer.py`: Summarizer agent — accepts `context_text` and `model_id` overrides.
 
-#### Database Schema (`app_data.db`, `meetings` table):
-- `id`, `title`, `created_at`, `is_active`, `summary_markdown`, `transcript`
-- `context_items` — JSON array of `{type, name, content}` objects
-- `copilot_model_id`, `summarizer_model_id` — per-meeting model overrides
+#### Database Schema (`app_data.db`):
+- `meetings` table: `id`, `title`, `created_at`, `is_active`, `summary_markdown`, `transcript`, `context_items`, `copilot_model_id`, `summarizer_model_id`
+- `summary_versions` table: `id`, `meeting_id`, `version_number`, `content`, `instruction`, `created_at` (plan/summarizer version history)
 
 ### Frontend (`/frontend`)
 A modern **Next.js 16 (App Router)** interface.
@@ -63,11 +62,25 @@ cd backend
 uv run uvicorn main:app --reload --port 8000
 ```
 
+Backend tests:
+```bash
+cd backend
+uv run pytest -q
+```
+
 ### Frontend
 From the root:
 ```bash
 cd frontend
 bun dev
+```
+
+Frontend quality gates:
+```bash
+cd frontend
+bun run lint
+bun run build
+bun run test
 ```
 
 ## 📡 API Endpoints
@@ -78,6 +91,7 @@ bun dev
 | POST | `/api/meeting/{id}/start` | Activate meeting (start recording) |
 | PATCH | `/api/meetings/{id}` | Update title/model selections |
 | DELETE | `/api/meetings/{id}` | Remove meeting permanently |
+| POST | `/api/meeting/cleanup-stale-drafts` | Remove abandoned old inactive setup drafts |
 | POST | `/api/meetings/{id}/reactivate` | Re-open finished meeting; appends old summary |
 | POST | `/api/meeting/{id}/context/text` | Add text note to context |
 | POST | `/api/meeting/{id}/context/file` | Upload file → extract → add to context |
@@ -87,7 +101,10 @@ bun dev
 | POST | `/api/meeting/transcript` | Append background audio chunk |
 | POST | `/api/chat/text` | Text query to copilot |
 | POST | `/api/chat/audio` | Audio query to copilot (PTT) |
-| POST | `/api/meeting/summarize` | End meeting & generate summary |
+| POST | `/api/meeting/summarize` | End meeting & generate summary (also stores summary version) |
+| POST | `/api/meeting/{id}/summaries/regenerate` | Regenerate summary/plan with optional instruction |
+| GET | `/api/meetings/{id}/summaries` | List summary versions |
+| POST | `/api/meetings/{id}/summaries/{version}/activate` | Activate selected summary version |
 | GET | `/api/meetings` | List all meetings |
 | GET | `/api/meetings/{id}` | Get meeting detail |
 
@@ -96,7 +113,9 @@ bun dev
 - **Context**: Context items are stored as JSON in `meeting.context_items` and injected into both copilot and summarizer prompts.
 - **Models**: Add/remove available models in `backend/models_config.json` — no code changes needed.
 - **Meeting Lifecycle**: `is_active=False` at creation → set `True` by `/start` → `False` by `/summarize` → can be re-`True` by `/reactivate`.
-- **Pause**: Frontend-only state — sets `isPausedRef` to skip sending background chunks. No backend change.
+- **Pause**: Frontend pause now explicitly stops background recorder loop and resumes safely without duplicate recorders.
+- **Setup draft strategy**: `/meetings/new` now creates draft meetings lazily (on first meaningful action), preventing orphan rows on page open/close.
+- **Plan versions**: each summarize/regenerate run is persisted in `summary_versions`; UI can switch active version and export markdown.
 - **Agno Usage**: Always check the session ID (`id` from URL) to maintain conversation context with the Agno Co-Pilot.
 
 ## ⚠️ Notes for Agents
@@ -108,3 +127,14 @@ bun dev
 - **Background recorder cleanup**: Always call `stream.getTracks().forEach(t => t.stop())` on meeting end.
 - **Context panel** is a separate `<motion.aside>` rendered between the transcript section and the chat sidebar.
 - **Reactivate**: Appends old summary to transcript with a `⟳ Meeting Resumed` separator, then clears `summary_markdown` so the UI doesn't auto-switch back to summary view.
+
+## Planning Workspace State (2026-04-04 17:21)
+- Active plan file: PLAN.md
+- Idea: explore this project and suggest improvements
+- Done gate: Mark [x] only after lint + relevant tests pass.
+- Detected lint commands:
+  - `cd frontend && bun run lint`
+- Detected test commands:
+  - `cd frontend && bun run test`
+  - `cd backend && uv run pytest -q`
+  - (build gate) `cd frontend && bun run build`

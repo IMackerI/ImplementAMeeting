@@ -1,13 +1,13 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { getMeetings, deleteMeeting } from '@/lib/api';
+import { deleteMeeting, getMeetings, type MeetingListItem } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import { Plus, Calendar, Clock, ArrowRight, User, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function MeetingsDashboard() {
-  const [meetings, setMeetings] = useState<any[]>([]);
+  const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const router = useRouter();
